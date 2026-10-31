@@ -1,0 +1,167 @@
+name: Bug report
+description: An effect looks wrong or doesn't play, or `cursor-fx`, the settings panel or the install misbehaves.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Most effect bugs depend on the setup (OS, Ghostty version, font, window padding, theme), so the details below are what make a bug reproducible.
+
+        **Quick check first:** run `cursor-fx off`. If the problem is still there with no effect active, it comes from Ghostty or the program you're running rather than from Cursor FX.
+
+  - type: dropdown
+    id: effect
+    attributes:
+      label: Effect
+      description: Which effect shows the problem? Pick several if it happens in more than one.
+      multiple: true
+      options:
+        - All effects
+        - cyber
+        - lightning
+        - glitch
+        - neon
+        - phosphor
+        - embers
+        - shockwave
+        - katana
+        - teleport
+        - fireworks
+        - aurora
+        - mecha
+        - hologram
+        - Not effect-specific
+    validations:
+      required: true
+
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part
+      description: Which part of the effect, or which tool?
+      multiple: true
+      options:
+        - Typing
+        - Enter (after sending a prompt or command)
+        - Done (when Claude Code's answer or a long command finishes)
+        - Delete-all / jump along the line
+        - Cursor look
+        - Prompt mark (❯)
+        - Box lines (Claude Code's input box)
+        - Input method (Chinese, Japanese, Korean…)
+        - Settings panel (cursor-fx edit)
+        - cursor-fx command
+        - Install or hooks
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: off-check
+    attributes:
+      label: Does it go away with `cursor-fx off`?
+      options:
+        - Yes, it only happens with an effect on
+        - No, it happens with `cursor-fx off` too
+        - Didn't try
+        - Not applicable (install, cursor-fx command or settings panel)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what you saw.
+      placeholder: The Enter effect plays one row above Claude Code's input box.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: The effect runs along the input box lines.
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. `cursor-fx cyber`
+        2. Start `claude`
+        3. Type a prompt and press Enter
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshot or screen recording
+      description: |
+        Effects are visual, so a short recording helps most (macOS: Cmd+Shift+5; Linux: your desktop's screen recorder). Drag the file into this box.
+
+  - type: dropdown
+    id: program
+    attributes:
+      label: Where does it happen?
+      multiple: true
+      options:
+        - Claude Code
+        - zsh
+        - bash
+        - fish
+        - tmux
+        - Another program (vim, htop…)
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15.4 / Ubuntu 24.04 (GNOME, Wayland)
+    validations:
+      required: true
+
+  - type: input
+    id: ghostty-version
+    attributes:
+      label: Ghostty version
+      description: "Ghostty → About Ghostty, or `ghostty +version` (on macOS: `/Applications/Ghostty.app/Contents/MacOS/ghostty +version`)."
+      placeholder: "1.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: fx-version
+    attributes:
+      label: Cursor FX version
+      description: The release you downloaded, or `git rev-parse --short HEAD` in your clone.
+      placeholder: v1.0.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Ghostty config
+      description: |
+        Output of `ghostty +show-config` (it lists only the settings you changed). Font, `adjust-cell-height`, `window-padding-*` and the theme matter most: the effects find Claude Code's input box by how it looks on screen.
+      render: ini
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Shader log
+      description: |
+        Only if an effect doesn't show up at all. Switch effects with the Ghostty window visible (a shader compiles on the next frame Ghostty draws), then copy the output of:
+
+        - macOS: `/usr/bin/log show --last 5m --info --style compact --predicate 'subsystem == "com.mitchellh.ghostty"' | grep -i shader`
+        - Linux: start Ghostty from another terminal with `GHOSTTY_LOG=stderr ghostty 2>&1 | grep -i shader`, then switch effects in the new window.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Settings you changed in `cursor-fx edit`, other shaders or terminal tools you use, or anything that seems related.
