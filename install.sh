@@ -45,5 +45,6 @@ cat <<EOF
 Next:
   cursor-fx lightning        pick an effect (Ghostty reloads)
   cursor-fx edit             tune it in your browser
-  hooks/claude-code-hook.json and hooks/zsh-hook.zsh   the Enter signal (see README)
+  hooks/claude-code-hook.json, hooks/pi-extension.ts and hooks/zsh-hook.zsh
+                             the Enter and done signals (see README)
 EOF
