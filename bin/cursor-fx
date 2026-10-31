@@ -1,0 +1,2263 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Switch Ghostty cursor effects.
+
+  cursor-fx            list the effects, the active one marked
+  cursor-fx <name>     switch to an effect (e.g. lightning, glitch)
+  cursor-fx off        plain cursor, no effect
+  cursor-fx enter off  pause the Enter effects (typing effects stay)
+  cursor-fx enter on   resume them
+  cursor-fx jumps off  no effect when the cursor jumps along a line (delete-all, Home...)
+  cursor-fx jumps on   ...or play the effect (edits JUMP_EFFECTS in every shader and reloads)
+  cursor-fx idle off   no small animations between keystrokes (crackle, breath, ping...):
+  cursor-fx idle on    a calmer screen (it saves little battery: Ghostty keeps redrawing
+                       while any effect is on; `cursor-fx off` is the power saver)
+  cursor-fx edit       open the settings panel in your browser: pick the effect, set its
+                       cursor color and every setting of its shader with a live preview;
+                       changes apply to Ghostty as you make them (--no-open: just print the URL)
+  cursor-fx signal     mark "Enter pressed" for the effects (run by the Claude Code
+                       UserPromptSubmit hook and zsh's preexec; --tty PATH to choose the tab)
+  cursor-fx signal done   mark "the answer arrived" (Claude Code's Stop hook; zsh after a
+                       command that took more than a few seconds)
+
+Each effect is a preset in ~/.config/ghostty/cursor-effects/<name>.conf that sets
+the cursor color and its shader. Switching makes a savepoint, rewrites the one
+`config-file = cursor-effects/...` line in the Ghostty config, validates it, and
+reloads Ghostty (SIGUSR2, the same as Command+Shift+,) so the effect starts at once.
+
+Works on macOS and Linux (Ghostty has no Windows version): the config lives in
+$XDG_CONFIG_HOME/ghostty or ~/.config/ghostty on both, and both the macOS app and
+the Linux GTK app reload on SIGUSR2.
+
+Test hooks: CURSOR_FX_CONFIG (config path; also skips the reload, since the running
+Ghostty doesn't read that file), CURSOR_FX_SAVEPOINTS, CURSOR_FX_TTY.
+"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+CONFIG = os.environ.get("CURSOR_FX_CONFIG") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "ghostty", "config")
+PRESETS = os.path.join(os.path.dirname(CONFIG), "cursor-effects")
+THEMES = os.path.join(os.path.dirname(CONFIG), "themes")
+SAVEPOINTS = os.environ.get("CURSOR_FX_SAVEPOINTS", os.path.expanduser("~/ghostty-savepoints"))
+CACHE = os.environ.get("CURSOR_FX_CACHE", os.path.expanduser("~/.cache/cursor-fx"))
+SIGNAL_TIME = 1.9  # seconds the Enter signal stays on (longer than the longest Enter effect)
+GHOSTTY_APP = "/Applications/Ghostty.app/Contents/MacOS/ghostty"  # macOS; Linux has `ghostty` on PATH
+GHOSTTY = GHOSTTY_APP if os.path.isfile(GHOSTTY_APP) else shutil.which("ghostty")
+SHADERS = os.path.join(os.path.dirname(CONFIG), "shaders")
+# The on/off settings every shader shares, switched for all of them at once.
+FLAGS = {"jumps": ("JUMP_EFFECTS", "Jump effects"), "idle": ("IDLE_EFFECTS", "Idle animations")}
+
+
+def flag_line(flag):
+    return re.compile(r'^(const\s+bool\s+' + FLAGS[flag][0] + r'\s*=\s*)(true|false)(\s*;.*)$')
+
+MARKER = "# Cursor effect preset"
+MARKER_LINE = MARKER + " from cursor-effects/ (switch with `cursor-fx <name>`, list with `cursor-fx`).\n"
+INCLUDE = re.compile(r'^\s*config-file\s*=\s*"?\??cursor-effects/([^"/]+)\.conf"?\s*$')
+# `cursor-fx enter off` leaves this comment in the config; `enter on` removes it.
+ENTER_OFF = re.compile(r'^\s*#\s*cursor-fx-enter\s*=\s*off\b')
+ENTER_OFF_LINE = "# cursor-fx-enter = off (Enter effects paused; `cursor-fx enter on` resumes them)\n"
+SETTING = re.compile(r'^\s*([a-z-]+)\s*=\s*(.*?)\s*$')
+
+ROLLBACK = """#!/bin/bash
+set -euo pipefail
+
+savepoint_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+(
+  cd "$savepoint_dir"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+)
+
+rescue_dir="$(mktemp -d "$savepoint_dir/pre-rollback.XXXXXX")"
+cp -p @CONFIG@ "$rescue_dir/ghostty-config"
+cp -p "$savepoint_dir/ghostty-config" @CONFIG@
+
+echo "已恢复 cursor-fx 切换前的 Ghostty 配置（光标特效：@BEFORE@）。"
+echo "回滚前的配置另存于：$rescue_dir"
+echo "请在 Ghostty 按 Command+Shift+, 重新加载。"
+"""
+
+
+def settings(path):
+    """The key = value lines of a Ghostty config file, as a dict (last one wins)."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = SETTING.match(line)
+                if m and not line.lstrip().startswith("#"):
+                    out[m.group(1)] = m.group(2).strip('"')
+    except OSError:
+        pass
+    return out
+
+
+# The order effects are listed in (CLI and panel); any other preset follows, by name.
+ORDER = ["cyber", "lightning", "glitch", "neon", "phosphor", "embers", "shockwave", "katana",
+         "teleport", "fireworks", "aurora", "mecha", "hologram"]
+
+
+def presets():
+    """(name, description) for every preset file, in ORDER, then the rest by name."""
+    found = []
+    if os.path.isdir(PRESETS):
+        entries = sorted(os.listdir(PRESETS), key=lambda e: (ORDER.index(e[:-5]) if e[:-5] in ORDER else len(ORDER), e))
+        for entry in entries:
+            if not entry.endswith(".conf"):
+                continue
+            desc = ""
+            with open(os.path.join(PRESETS, entry), encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        desc = line.lstrip("# ").strip()
+                        desc = desc.split(": ", 1)[1] if ": " in desc else desc
+                        break
+            found.append((entry[:-5], desc))
+    return found
+
+
+def active(lines):
+    for line in lines:
+        m = INCLUDE.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def enter_enabled(lines):
+    return not any(ENTER_OFF.match(line) for line in lines)
+
+
+def set_enter(state):
+    """Pause or resume the Enter effects (a comment line in the config; no reload needed,
+    since `cursor-fx signal` checks it each time)."""
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = f.readlines()
+    now = enter_enabled(lines)
+    if state is None:
+        print(f"Enter effects: {'on' if now else 'off'} (cursor-fx enter on|off)")
+        return 0
+    if state not in ("on", "off"):
+        print("Usage: cursor-fx enter on|off")
+        return 1
+    if (state == "on") == now:
+        print(f"Enter effects are already {state}.")
+        return 0
+    if state == "on":
+        out = [line for line in lines if not ENTER_OFF.match(line)]
+    else:
+        out = list(lines)
+        at = next((i for i, line in enumerate(out) if INCLUDE.match(line) or line.startswith(MARKER)), None)
+        if at is None:
+            if out and not out[-1].endswith("\n"):
+                out[-1] += "\n"
+            out.append(ENTER_OFF_LINE)
+        else:
+            out.insert(at + 1, ENTER_OFF_LINE)
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        f.writelines(out)
+    print(f"Enter effects: {state}" + (" (typing effects stay; sends and commands do nothing extra)" if state == "off" else ""))
+    return 0
+
+
+def savepoint(label, before):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    sp = os.path.join(SAVEPOINTS, f"{stamp}-before-{label}")
+    n = 2
+    while os.path.exists(sp):
+        sp = os.path.join(SAVEPOINTS, f"{stamp}-{n}-before-{label}")
+        n += 1
+    os.makedirs(sp)
+    copy = os.path.join(sp, "ghostty-config")
+    shutil.copy2(CONFIG, copy)
+    with open(copy, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    with open(os.path.join(sp, "SHA256SUMS"), "w", encoding="utf-8") as f:
+        f.write(f"{digest}  ghostty-config\n")
+    rollback = os.path.join(sp, "rollback.sh")
+    with open(rollback, "w", encoding="utf-8") as f:
+        f.write(ROLLBACK.replace("@CONFIG@", shlex.quote(CONFIG)).replace("@BEFORE@", before))
+    os.chmod(rollback, 0o755)
+    return sp
+
+
+def reset_cursor_color():
+    """Drop a cursor color this tab was given by escape code (OSC 112), so it follows
+    the config again. Earlier versions of cursor-fx set one with OSC 12, and such an
+    override survives config reloads."""
+    tty = os.environ.get("CURSOR_FX_TTY")
+    if not tty:
+        if os.environ.get("TMUX") or not sys.stdout.isatty():
+            return
+        tty = "/dev/tty"
+    try:
+        with open(tty, "w") as f:
+            f.write("\033]112\007")
+    except OSError:
+        pass
+
+
+def ghostty_pids():
+    """The running Ghostty app: the one this command runs in, else any Ghostty app process."""
+    pid = os.getpid()
+    while pid > 1:
+        out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout.strip()
+        if not out:
+            break
+        ppid, comm = out.split(None, 1)
+        if comm == GHOSTTY or os.path.basename(comm) == "ghostty":  # macOS shows the full path, Linux the name
+            return [pid]
+        pid = int(ppid)
+    if GHOSTTY == GHOSTTY_APP:
+        found = subprocess.run(["pgrep", "-f", GHOSTTY], capture_output=True, text=True).stdout.split()
+    else:
+        found = subprocess.run(["pgrep", "-x", "ghostty"], capture_output=True, text=True).stdout.split()
+    apps = []
+    for p in found:
+        args = subprocess.run(["ps", "-o", "args=", "-p", p], capture_output=True, text=True).stdout.strip()
+        if " +" not in args:  # skip CLI runs like `ghostty +show-config`
+            apps.append(int(p))
+    return apps
+
+
+def reload_ghostty():
+    """Ask Ghostty to reload its config (it handles SIGUSR2 like Command+Shift+,)."""
+    if "CURSOR_FX_CONFIG" in os.environ:
+        return False
+    sent = False
+    for pid in ghostty_pids():
+        try:
+            os.kill(pid, signal.SIGUSR2)
+            sent = True
+        except OSError:
+            pass
+    return sent
+
+
+def list_effects():
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = f.readlines()
+    now = active(lines)
+    found = presets()
+    width = max([len(name) for name, _ in found] + [3])
+    print("Cursor effects (switch with: cursor-fx <name>):")
+    for name, desc in found + [("off", "plain cursor, no effect")]:
+        mark = "●" if name == (now or "off") else " "
+        print(f"  {mark} {name.ljust(width)}  {desc}")
+    print(f"Enter effects: {'on' if enter_enabled(lines) else 'off'} (cursor-fx enter on|off)")
+    for flag in FLAGS:
+        print(f"{FLAGS[flag][1]}: {flag_state(flag)} (cursor-fx {flag} on|off)")
+    return 0
+
+
+def flag_lines(flag):
+    """(shader path, lines, index of the flag's line) for every shader that has it."""
+    found = []
+    pattern = flag_line(flag)
+    if os.path.isdir(SHADERS):
+        for entry in sorted(os.listdir(SHADERS)):
+            if not entry.endswith(".glsl"):
+                continue
+            path = os.path.join(SHADERS, entry)
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            at = next((i for i, line in enumerate(lines) if pattern.match(line)), None)
+            if at is not None:
+                found.append((path, lines, at))
+    return found
+
+
+def flag_state(flag):
+    pattern = flag_line(flag)
+    states = {pattern.match(lines[at]).group(2) for _, lines, at in flag_lines(flag)}
+    if not states:
+        return "n/a"
+    return {"true": "on", "false": "off"}[states.pop()] if len(states) == 1 else "mixed"
+
+
+def set_flag(flag, state):
+    """Turn a shared on/off setting (`cursor-fx jumps`, `cursor-fx idle`) on or off in every shader."""
+    label = FLAGS[flag][1]
+    if state is None:
+        print(f"{label}: {flag_state(flag)} (cursor-fx {flag} on|off)")
+        return 0
+    if state not in ("on", "off"):
+        print(f"Usage: cursor-fx {flag} on|off")
+        return 1
+    value = "true" if state == "on" else "false"
+    pattern = flag_line(flag)
+    changed = 0
+    for path, lines, at in flag_lines(flag):
+        m = pattern.match(lines[at])
+        if m.group(2) == value:
+            continue
+        lines[at] = m.group(1) + value + m.group(3) + "\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        changed += 1
+    print(f"{label}: {state} ({changed} shader{'s' if changed != 1 else ''} changed)")
+    if changed and reload_ghostty():
+        print("Ghostty reloaded.")
+    elif changed:
+        print("Press Command+Shift+, in Ghostty to apply it.")
+    return 0
+
+
+def switch(name):
+    names = [n for n, _ in presets()]
+    if name != "off" and name not in names:
+        print(f"No cursor effect named '{name}'. Choose one of: {', '.join(names + ['off'])}")
+        return 1
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = f.readlines()
+    before = active(lines) or "off"
+    if before == name:
+        # Still reload, so edits to the effect's shader file take effect.
+        reloaded = reload_ghostty()
+        print(f"Cursor effect is already: {name}" + (" (reloaded Ghostty)" if reloaded else ""))
+        return 0
+
+    # A preset must point at a shader that exists, or Ghostty silently runs without it.
+    if name != "off":
+        shader = settings(os.path.join(PRESETS, f"{name}.conf")).get("custom-shader")
+        if shader and not os.path.isfile(os.path.join(PRESETS, os.path.expanduser(shader))):
+            print(f"The '{name}' preset points at a shader that doesn't exist: {shader}")
+            return 1
+
+    out = [line for line in lines if not INCLUDE.match(line)]
+    include = f"config-file = cursor-effects/{name}.conf\n"
+    at = next((i for i, line in enumerate(out) if line.startswith(MARKER)), None)
+    if at is None:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.append(MARKER_LINE)
+        at = len(out) - 1
+    if name != "off":
+        out.insert(at + 1, include)
+
+    sp = savepoint(f"cursor-fx-{name}", before)
+    with open(CONFIG, "w", encoding="utf-8") as f:  # in place, so a symlinked config stays a symlink
+        f.writelines(out)
+    check = subprocess.run([GHOSTTY, "+validate-config", f"--config-file={CONFIG}"],
+                           capture_output=True, text=True) if GHOSTTY else None
+    if check is None:
+        print("Note: `ghostty` wasn't found on PATH, so the config wasn't validated.")
+    elif check.returncode != 0:
+        shutil.copy2(os.path.join(sp, "ghostty-config"), CONFIG)
+        print("Ghostty rejected the new config, so nothing was changed:")
+        print(check.stdout + check.stderr)
+        return 1
+
+    color = preset_color(name)
+    reset_cursor_color()
+
+    print(f"Cursor effect: {name}" + (f" (cursor {color})" if color else ""))
+    if color and len(color.lstrip("#")) == 6 and int(color.lstrip("#")[2:], 16) & 0x0101:
+        print("Note: this cursor color's green or blue value is odd; the Enter/done effects need both even (e.g. ...fe, not ...ff).")
+    if reload_ghostty():
+        print("Ghostty reloaded: the effect is live in every window.")
+    else:
+        print("Press Command+Shift+, in Ghostty to apply it.")
+    print(f"Undo: bash {shlex.quote(os.path.join(sp, 'rollback.sh'))}")
+    return 0
+
+
+def preset_color(name):
+    """The cursor color a preset sets (for "off", the config's or the theme's)."""
+    if name == "off":
+        theme = settings(CONFIG).get("theme", "")
+        return settings(CONFIG).get("cursor-color") or settings(os.path.join(THEMES, theme)).get("cursor-color")
+    return settings(os.path.join(PRESETS, f"{name}.conf")).get("cursor-color")
+
+
+def own_tty():
+    """The terminal this command runs in: the first ancestor process that has one."""
+    pid = os.getpid()
+    while pid > 1:
+        out = subprocess.run(["ps", "-o", "ppid=,tty=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout.split()
+        if len(out) < 2:
+            return None
+        if out[1] not in ("??", "-"):
+            return "/dev/" + out[1]
+        pid = int(out[0])
+    return None
+
+
+def signal_enter(argv):
+    """Tell the cursor effects that Enter was pressed (a prompt sent, a command run),
+    or, with `done`, that the answer arrived (Claude finished, a long command ended).
+
+    Sets the tab's cursor color to the preset's color with the lowest bit of its blue
+    value set for Enter, or of its green value for done (invisible to the eye); the
+    shaders read those bits, and SIGNAL_TIME later the color is reset. Prints
+    nothing: Claude Code adds a UserPromptSubmit hook's output to the prompt.
+    """
+    tty = argv[argv.index("--tty") + 1] if "--tty" in argv else own_tty()
+    kind = "done" if "done" in argv[2:] else "enter"
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = f.readlines()
+    if not enter_enabled(lines):
+        return 0
+    name = active(lines) or "off"
+    color = (preset_color(name) or "").lstrip("#")
+    if not tty or len(color) != 6:
+        return 0
+    r, g, b = int(color[:2], 16), int(color[2:4], 16), int(color[4:], 16)
+    g, b = (g & ~1, b | 1) if kind == "enter" else (g | 1, b & ~1)
+    os.makedirs(CACHE, exist_ok=True)
+    marker = os.path.join(CACHE, "signal-" + os.path.basename(tty))
+    # Every signal flips the red value's lowest bit (invisible too), so a new one while the
+    # last is still on is a change of color the shaders see. Before, they took any cursor
+    # jump during a signal for a new one, and a Tab completion replayed the Enter effect.
+    try:
+        with open(marker, encoding="utf-8") as f:
+            parity = 1 - int(f.read().rsplit(":", 1)[1])
+    except (OSError, ValueError, IndexError):
+        parity = 1 - (r & 1)
+    r = (r & ~1) | parity
+    signal_color = f"{r:02x}{g:02x}{b:02x}"
+    token = f"{time.time():.6f}:{parity}"
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(token)
+    fd = os.open(tty, os.O_WRONLY | os.O_NONBLOCK)  # never hang on a tab that's gone
+    try:
+        os.write(fd, f"\033]12;#{signal_color}\007".encode())
+    finally:
+        os.close(fd)
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "signal-off", tty, marker, token],
+                     start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = os.path.join(CACHE, "signal.log")
+    mode = "w" if os.path.exists(log) and os.path.getsize(log) > 100_000 else "a"
+    with open(log, mode, encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {tty} {name} {kind} #{signal_color}\n")
+    return 0
+
+
+def signal_off(tty, marker, token):
+    """Reset the cursor color after SIGNAL_TIME, unless a newer signal took over."""
+    time.sleep(SIGNAL_TIME)
+    try:
+        with open(marker, encoding="utf-8") as f:
+            if f.read() != token:
+                return 0
+        with open(tty, "w") as f:
+            f.write("\033]112\007")
+        os.remove(marker)
+    except OSError:
+        pass
+    return 0
+
+
+# --- the settings panel (`cursor-fx edit`) -----------------------------------
+# Every shader keeps its settings as `const <type> NAME = value;  // what it does`
+# lines at the top; the panel reads them, shows a control per line, writes the
+# value back into the file and reloads Ghostty. The preview in the page runs the
+# very same shader in WebGL.
+
+SETTING_LINE = re.compile(r'^(const\s+(bool|float|int|vec2|vec3)\s+([A-Z][A-Z0-9_]*)\s*=\s*)([^;]+?)(\s*;.*)$')
+PRESET_COLOR = re.compile(r'^(\s*cursor-color\s*=\s*)(\S+)(.*)$')
+PRESET_BLINK = re.compile(r'^(\s*cursor-style-blink\s*=\s*)(\S+)(.*)$')
+PALETTE_LINE = re.compile(r'^\s*palette\s*=\s*(\d+)\s*=\s*(#?[0-9a-fA-F]{6})')
+
+
+def shader_settings(path):
+    """The `const` lines of a shader, in file order: [{name, type, value, comment, section, group}].
+    Lines after a `// --- fine-tuning ---` marker are the "fine" section (folded away in the panel);
+    a `// -- Name` line starts a group (a heading in the panel) until the next one."""
+    out = []
+    section, group = "main", None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if re.match(r"^\s*//\s*---\s*fine", line):
+                section, group = "fine", None
+                continue
+            g = re.match(r"^\s*//\s*--\s+(\S.*?)\s*$", line)
+            if g:
+                group = g.group(1)
+                continue
+            m = SETTING_LINE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            tail = m.group(5)
+            comment = tail.split("//", 1)[1].strip() if "//" in tail else ""
+            out.append({"name": m.group(3), "type": m.group(2), "value": m.group(4).strip(),
+                        "comment": comment, "section": section, "group": group})
+    return out
+
+
+def glsl_value(kind, value):
+    """`value` from the page (bool, number or list) as GLSL source for a `const` of
+    this type, or None if it doesn't fit."""
+    def num(v):
+        v = float(v)
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError(v)
+        s = f"{v:.4f}".rstrip("0")
+        return s + "0" if s.endswith(".") else s
+    try:
+        if kind == "bool":
+            return "true" if value else "false"
+        if kind == "float":
+            return num(value)
+        if kind == "int":
+            return str(int(value))
+        n = {"vec2": 2, "vec3": 3}[kind]
+        parts = [num(v) for v in value]
+        if len(parts) != n:
+            return None
+        return f"{kind}({', '.join(parts)})"
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def set_shader_value(path, name, source):
+    """Rewrite one `const` line's value (as GLSL source text). False if there is no such line."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        m = SETTING_LINE.match(line.rstrip("\n"))
+        if m and m.group(3) == name:
+            lines[i] = m.group(1) + source + m.group(5) + "\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return True
+    return False
+
+
+def set_preset_color(name, color):
+    """Write a preset's `cursor-color` (color as rrggbb). False if the preset has none."""
+    path = os.path.join(PRESETS, f"{name}.conf")
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        m = PRESET_COLOR.match(line.rstrip("\n"))
+        if m:
+            lines[i] = m.group(1) + "#" + color + m.group(3) + "\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return True
+    return False
+
+
+def preset_blink(name):
+    """Whether the cursor blinks with a preset: its own `cursor-style-blink`, else the main config's (Ghostty's default: on)."""
+    own = settings(os.path.join(PRESETS, f"{name}.conf")).get("cursor-style-blink")
+    if own is None:
+        own = settings(CONFIG).get("cursor-style-blink", "true")
+    return own.strip().lower() != "false"
+
+
+def set_preset_blink(name, on):
+    """Write a preset's `cursor-style-blink` (a preset's settings override the main config's), after its cursor-color line if it has none yet.
+    None removes the line, so the preset follows the main config again."""
+    path = os.path.join(PRESETS, f"{name}.conf")
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if on is None:
+        lines = [line for line in lines if not PRESET_BLINK.match(line.rstrip("\n"))]
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return
+    value = "true" if on else "false"
+    for i, line in enumerate(lines):
+        m = PRESET_BLINK.match(line.rstrip("\n"))
+        if m:
+            lines[i] = m.group(1) + value + m.group(3) + "\n"
+            break
+    else:
+        at = next((i + 1 for i, line in enumerate(lines) if PRESET_COLOR.match(line.rstrip("\n"))), len(lines))
+        lines.insert(at, f"cursor-style-blink = {value}\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def preset_shader(name):
+    """Path of the shader file a preset points at, or None."""
+    shader = settings(os.path.join(PRESETS, f"{name}.conf")).get("custom-shader")
+    if not shader:
+        return None
+    path = os.path.join(PRESETS, os.path.expanduser(shader))
+    return path if os.path.isfile(path) else None
+
+
+def terminal_colors():
+    """Background, text, cursor-text and palette the preview draws with: the config's
+    own values, else the theme file's, else Ghostty-like defaults."""
+    conf = settings(CONFIG)
+    theme = conf.get("theme", "")
+    colors = {"background": "#1e1e2e", "foreground": "#cdd6f4", "cursorText": "", "palette": [""] * 16}
+    for path in (os.path.join(THEMES, theme), CONFIG):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    m = PALETTE_LINE.match(line)
+                    if m and int(m.group(1)) < 16:
+                        colors["palette"][int(m.group(1))] = "#" + m.group(2).lstrip("#")
+        except OSError:
+            pass
+        values = settings(path)
+        for key, mine in (("background", "background"), ("foreground", "foreground"), ("cursor-text", "cursorText")):
+            if values.get(key, "").startswith("#"):
+                colors[mine] = values[key]
+    return colors
+
+
+def savepoint_effects(label):
+    """Copy every shader and preset into a savepoint with a rollback script."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    sp = os.path.join(SAVEPOINTS, f"{stamp}-before-{label}")
+    n = 2
+    while os.path.exists(sp):
+        sp = os.path.join(SAVEPOINTS, f"{stamp}-{n}-before-{label}")
+        n += 1
+    os.makedirs(os.path.join(sp, "shaders"))
+    os.makedirs(os.path.join(sp, "cursor-effects"))
+    sums = []
+    for src, sub, ext in ((SHADERS, "shaders", ".glsl"), (PRESETS, "cursor-effects", ".conf")):
+        for entry in sorted(os.listdir(src)):
+            if entry.endswith(ext):
+                shutil.copy2(os.path.join(src, entry), os.path.join(sp, sub, entry))
+                with open(os.path.join(src, entry), "rb") as f:
+                    sums.append(f"{hashlib.sha256(f.read()).hexdigest()}  {sub}/{entry}\n")
+    with open(os.path.join(sp, "SHA256SUMS"), "w", encoding="utf-8") as f:
+        f.writelines(sums)
+    script = f"""#!/bin/bash
+set -euo pipefail
+savepoint_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+( cd "$savepoint_dir" && shasum -a 256 -c SHA256SUMS >/dev/null )
+rescue_dir="$(mktemp -d "$savepoint_dir/pre-rollback.XXXXXX")"
+mkdir -p "$rescue_dir/shaders" "$rescue_dir/cursor-effects"
+for f in "$savepoint_dir"/shaders/*.glsl; do
+  name="$(basename "$f")"
+  [ -f {shlex.quote(SHADERS)}/"$name" ] && cp -p {shlex.quote(SHADERS)}/"$name" "$rescue_dir/shaders/"
+  cp -p "$f" {shlex.quote(SHADERS)}/"$name"
+done
+for f in "$savepoint_dir"/cursor-effects/*.conf; do
+  name="$(basename "$f")"
+  [ -f {shlex.quote(PRESETS)}/"$name" ] && cp -p {shlex.quote(PRESETS)}/"$name" "$rescue_dir/cursor-effects/"
+  cp -p "$f" {shlex.quote(PRESETS)}/"$name"
+done
+echo "Restored every cursor effect shader and preset from before {label}. The files from before this rollback are in: $rescue_dir"
+echo "Run cursor-fx <name of the active effect> to reload Ghostty."
+"""
+    with open(os.path.join(sp, "rollback.sh"), "w", encoding="utf-8") as f:
+        f.write(script)
+    os.chmod(os.path.join(sp, "rollback.sh"), 0o755)
+    return sp
+
+
+def system_language():
+    """'zh' when the system's first preferred language is Chinese, else 'en'
+    (macOS: AppleLanguages; elsewhere LC_ALL / LC_MESSAGES / LANG)."""
+    langs = []
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True, timeout=3).stdout
+            langs = re.findall(r'"?([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)*)"?\s*[,)]', out)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    langs += [os.environ.get(k, "") for k in ("LC_ALL", "LC_MESSAGES", "LANG")]
+    first = next((l for l in langs if l and l not in ("C", "POSIX")), "en")
+    return "zh" if first.lower().startswith("zh") else "en"
+
+
+def panel_state(session):
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = f.readlines()
+    effects = []
+    for name, desc in presets():
+        path = preset_shader(name)
+        if not path:
+            continue
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+        effects.append({"name": name, "description": desc, "color": preset_color(name) or "", "blink": preset_blink(name),
+                        "shader": os.path.basename(path), "settings": shader_settings(path), "source": source})
+    return {"effects": effects, "active": active(lines) or "off", "enter": enter_enabled(lines),
+            "jumps": flag_state("jumps"), "idle": flag_state("idle"), "colors": terminal_colors(),
+            "yDown": sys.platform == "darwin", "sysLang": system_language(),
+            "sharedFlags": [v[0] for v in FLAGS.values()],
+            "savepoint": session.get("savepoint"), "original": session["original"]}
+
+
+def quietly(func, *args):
+    """Run a command function and return (its return code, what it printed)."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = func(*args)
+    return code, out.getvalue().strip()
+
+
+def make_panel_handler(session):
+    def ensure_savepoint():
+        if not session.get("savepoint"):
+            session["savepoint"] = savepoint_effects("cursor-fx-edit")
+
+    def schedule_reload():
+        if session.get("timer"):
+            session["timer"].cancel()
+        session["timer"] = threading.Timer(0.3, reload_ghostty)
+        session["timer"].daemon = True
+        session["timer"].start()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, code, body, ctype="application/json; charset=utf-8"):
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            url = urlparse(self.path)
+            if url.path == "/" and parse_qs(url.query).get("t", [""])[0] == session["token"]:
+                session["last"] = time.time()
+                state = json.dumps(panel_state(session)).replace("</", "<\\/")
+                page = (PANEL_HTML.replace("__TOKEN__", session["token"]).replace("__STATE__", state)
+                        .replace("__ZH__", json.dumps(PANEL_ZH, ensure_ascii=False).replace("</", "<\\/")))
+                return self.reply(200, page, "text/html; charset=utf-8")
+            if url.path == "/favicon.ico":
+                return self.reply(204, "")
+            self.reply(403, '{"error": "forbidden"}')
+
+        def do_POST(self):
+            if self.headers.get("X-Token") != session["token"]:
+                return self.reply(403, '{"error": "forbidden"}')
+            session["last"] = time.time()
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            except ValueError:
+                return self.reply(400, '{"error": "bad request"}')
+            path = urlparse(self.path).path
+            effect = str(body.get("effect", ""))
+            names = [n for n, _ in presets()]
+            if path == "/quit":
+                self.reply(200, '{"ok": true}')
+                threading.Thread(target=session["server"].shutdown, daemon=True).start()
+                return
+            if path == "/state":
+                return self.reply(200, json.dumps(panel_state(session)))
+            if path == "/toggle":
+                what, state = body.get("what"), "on" if body.get("on") else "off"
+                if what == "enter":
+                    _, message = quietly(set_enter, state)
+                elif what in FLAGS:
+                    _, message = quietly(set_flag, what, state)
+                else:
+                    return self.reply(400, '{"error": "unknown switch"}')
+                return self.reply(200, json.dumps({"ok": True, "message": message}))
+            if effect not in names:
+                return self.reply(400, '{"error": "unknown effect"}')
+            if path == "/activate":
+                code, message = quietly(switch, effect)
+                return self.reply(200, json.dumps({"ok": code == 0, "message": message}))
+            shader = preset_shader(effect)
+            if path == "/set":
+                source = glsl_value(str(body.get("type")), body.get("value"))
+                if source is None or not shader:
+                    return self.reply(400, '{"error": "bad value"}')
+                # A float that started above zero is a divisor somewhere; zero would make the shader flash.
+                was = session["original"].get(effect, {}).get("settings", {}).get(str(body.get("name")), "")
+                try:
+                    if body.get("type") == "float" and float(was) > 0 and float(body.get("value")) <= 0:
+                        return self.reply(400, '{"error": "must stay above zero"}')
+                except (TypeError, ValueError):
+                    pass
+                ensure_savepoint()
+                if not set_shader_value(shader, str(body.get("name")), source):
+                    return self.reply(400, '{"error": "unknown setting"}')
+                schedule_reload()
+                return self.reply(200, json.dumps({"ok": True, "source": source, "savepoint": session["savepoint"]}))
+            if path == "/color":
+                color = str(body.get("color", "")).lstrip("#").lower()
+                if not re.fullmatch(r"[0-9a-f]{6}", color):
+                    return self.reply(400, '{"error": "bad color"}')
+                color = f"{color[:2]}{int(color[2:4], 16) & ~1:02x}{int(color[4:], 16) & ~1:02x}"  # the signals need even green and blue
+                ensure_savepoint()
+                if not set_preset_color(effect, color):
+                    return self.reply(400, '{"error": "preset has no cursor-color"}')
+                schedule_reload()
+                return self.reply(200, json.dumps({"ok": True, "color": "#" + color, "savepoint": session["savepoint"]}))
+            if path == "/blink":
+                ensure_savepoint()
+                set_preset_blink(effect, bool(body.get("on")))
+                schedule_reload()
+                return self.reply(200, json.dumps({"ok": True, "blink": preset_blink(effect), "savepoint": session["savepoint"]}))
+            if path == "/reset":
+                original = session["original"].get(effect)
+                if not original or not shader:
+                    return self.reply(400, '{"error": "nothing to reset"}')
+                ensure_savepoint()
+                for name, value in original["settings"].items():
+                    set_shader_value(shader, name, value)
+                if original["color"]:
+                    set_preset_color(effect, original["color"].lstrip("#"))
+                own = original["ownBlink"]
+                set_preset_blink(effect, None if own is None else own.strip().lower() != "false")
+                schedule_reload()
+                return self.reply(200, json.dumps({"ok": True}))
+            self.reply(404, '{"error": "not found"}')
+
+    return Handler
+
+
+def edit_panel(open_browser=True):
+    if not os.path.isdir(PRESETS):
+        print(f"No cursor effects found in {PRESETS}")
+        return 1
+    original = {}
+    for name, _ in presets():
+        path = preset_shader(name)
+        if path:
+            original[name] = {"color": preset_color(name) or "",
+                              "ownBlink": settings(os.path.join(PRESETS, f"{name}.conf")).get("cursor-style-blink"),
+                              "settings": {s["name"]: s["value"] for s in shader_settings(path)}}
+    session = {"token": secrets.token_urlsafe(16), "last": time.time(), "original": original}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_panel_handler(session))
+    session["server"] = server
+
+    def close_when_idle():  # a forgotten panel shuts itself down after an hour without use
+        while time.time() - session["last"] < 3600:
+            time.sleep(60)
+        server.shutdown()
+
+    threading.Thread(target=close_when_idle, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/?t={session['token']}"
+    print(f"Cursor effects panel: {url}")
+    print("Changes apply to Ghostty as you make them. Close the panel (or press Ctrl-C here) when done.", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    if session.get("savepoint"):
+        print(f"\nDone. Undo everything from this session: bash {shlex.quote(os.path.join(session['savepoint'], 'rollback.sh'))}")
+    else:
+        print("\nNo changes.")
+    return 0
+
+
+# The panel in Chinese: setting names (by constant), setting notes (by their English
+# text; a note without a translation shows in English) and each effect's name and summary.
+PANEL_ZH = {
+ "groups": {
+  "Typing": "打字",
+  "Look": "外观",
+  "Cursor": "光标",
+  "Box lines": "输入框线条",
+  "Timing": "时机",
+  "Enter & done": "回车与完成",
+  "Delete-all": "全删",
+  "Prompt mark": "提示符",
+  "Your text": "你的文字"
+ },
+ "names": {
+  "AFTERGLOW": "余辉",
+  "ARC": "弧度",
+  "BEAM_TIME": "光束时长",
+  "BEND": "弯曲程度",
+  "BLOOM_RADIUS": "泛光半径",
+  "BLOOM_STRENGTH": "泛光强度",
+  "BOLT_COLOR": "闪电颜色",
+  "BOLT_DURATION": "闪电时长",
+  "BOLT_JAGGED": "闪电锯齿",
+  "BOLT_MIN_CELLS": "闪电最短距离",
+  "BOLT_WIDTH": "闪电粗细",
+  "BRANCHES": "分支数",
+  "BREATH_DEPTH": "呼吸深度",
+  "BREATH_PERIOD": "呼吸周期",
+  "BRIGHTNESS": "亮度",
+  "BURST_RADIUS": "爆发半径",
+  "BURST_TIME": "爆发时长",
+  "COAL_GLOW": "炭火光晕",
+  "COLOR_SPEED": "颜色流动速度",
+  "CORE_COLOR": "核心颜色",
+  "CURSOR_EFFECT": "光标外观",
+  "CURSOR_GLOW": "光标光晕",
+  "CURSOR_RAIN": "光标字符雨速度",
+  "CURSOR_SHADE": "光标字符深浅",
+  "CURSOR_STRENGTH": "光标外观强度",
+  "CURTAIN_HEIGHT": "光幕高度",
+  "DECODE_TIME": "解密时长",
+  "DENSITY": "密度",
+  "DEPTH": "景深层亮度",
+  "DISSOLVE_TIME": "溶解时长",
+  "DONE_EFFECT": "完成效果",
+  "EMBER_SIZE": "余烬大小",
+  "ENTER_EFFECT": "回车效果",
+  "ENTER_EMBERS": "回车余烬数",
+  "ENTER_FUSE": "回车引信时长",
+  "ENTER_JUMP": "回车跳动幅度",
+  "ENTER_PIXELS": "回车像素数",
+  "ENTER_SPREAD": "回车扩散时间",
+  "ENTER_SWEEP": "回车扫过时长",
+  "ENTER_TIME": "回车效果时长",
+  "FLICKER_RATE": "闪烁频率",
+  "FRINGE": "色边",
+  "GHOST_ALPHA": "残影透明度",
+  "GHOST_SHIFT": "残影偏移",
+  "GLINT_TIME": "闪光时长",
+  "GLOW_RADIUS": "光晕半径",
+  "GLOW_SIDE": "侧向光晕",
+  "GLOW_SIZE": "光晕大小",
+  "GLOW_CORE": "光晕内核",
+  "LINE_COLOR": "线条颜色",
+  "GLOW_STRENGTH": "光晕强度",
+  "GLYPH_SIZE": "字符大小",
+  "GRAVITY": "重力",
+  "IDLE_CHANCE": "空闲触发概率",
+  "IDLE_DURATION": "空闲动画时长",
+  "IDLE_EFFECTS": "空闲动画",
+  "IDLE_LIFE": "空闲余烬寿命",
+  "IDLE_PERIOD": "空闲间隔",
+  "IDLE_STRENGTH": "空闲强度",
+  "IGNITE_TIME": "点亮时长",
+  "JUMP_CELLS": "跳跃阈值",
+  "JUMP_EFFECTS": "跳跃效果",
+  "JUMP_EMBERS": "跳跃余烬数",
+  "JUMP_SETTLE": "跳跃后等待",
+  "LAUNCH_MIN": "发射阈值",
+  "LIFE": "寿命",
+  "LINE_CRACKLE": "线条噼啪范围",
+  "LINE_EFFECT": "输入框线条",
+  "LINE_GLOW": "线条光晕",
+  "LINE_REACH": "线条范围",
+  "LINE_STRENGTH": "线条效果强度",
+  "TEXT_COLOR": "输入文字着色",
+  "TEXT_TINT": "文字着色强度",
+  "PHRASE_TIME": "中文解密时长",
+  "LINE_WIDTH": "线条粗细",
+  "MAX_ARC": "最大弧度",
+  "MAX_BRANCH": "最长分支",
+  "MAX_JAGGED": "最大锯齿",
+  "MAX_OVERSHOOT": "最大延伸",
+  "MOVE_DURATION": "移动时长",
+  "NOISE_BLOCKS": "噪点方块",
+  "OVERSHOOT": "延伸",
+  "PING_PERIOD": "声呐间隔",
+  "PING_RADIUS": "声呐半径",
+  "PING_RIM": "声呐边缘亮度",
+  "PING_TIME": "声呐时长",
+  "PIXEL_SIZE": "像素大小",
+  "POP_TIME": "闪耀时长",
+  "PROMPT_EFFECT": "提示符 ❯",
+  "RAIN_COLOR": "字符雨颜色",
+  "RAIN_HEIGHT": "雨起始高度",
+  "RAIN_SPEED": "下落速度",
+  "RIM": "边缘亮度",
+  "RING_WIDTH": "环宽",
+  "RISE": "上升速度",
+  "RISE_HEIGHT": "上升高度",
+  "RISE_TIME": "上升时长",
+  "ROLL_PERIOD": "刷新间隔",
+  "ROLL_TIME": "刷新时长",
+  "SCANLINE_DEPTH": "扫描线深度",
+  "SCANLINE_PX": "扫描线间距",
+  "SCAN_PERIOD": "扫描周期",
+  "SEND_DURATION": "发送时长",
+  "SETTLE": "稳定等待",
+  "SHIMMER_TIME": "闪烁时长",
+  "SLASH_MIN": "斩击阈值",
+  "SLASH_TIME": "斩击时长",
+  "SLICES": "切片数",
+  "SLICE_SHIFT": "切片偏移",
+  "SLIDE": "滑动距离",
+  "SPARKS": "火花数",
+  "SPARK_DURATION": "火花时长",
+  "SPLIT": "分开距离",
+  "SPLIT_REACH": "分开范围",
+  "SPREAD": "扩散时间",
+  "STAGGER": "错开时间",
+  "STEP_RATE": "变化频率",
+  "SURGE_TIME": "电涌时长",
+  "SWEEP_TIME": "扫过时长",
+  "TELEPORT_MIN": "传送阈值",
+  "TRACE_ALPHA": "痕迹透明度",
+  "TRAIL": "拖尾长度",
+  "TRAIL_ALPHA": "拖尾透明度",
+  "TRAIL_COLOR": "拖尾颜色",
+  "TRAIL_DECAY": "拖尾消退",
+  "TRAIL_SWEEP": "拖尾扫过",
+  "TRAVEL_TIME": "飞行时长",
+  "TUBE_INSET": "灯管内缩",
+  "TUBE_STRENGTH": "灯管亮度",
+  "TUBE_WIDTH": "灯管粗细",
+  "DECODE_STYLE": "解密样式",
+  "BEAM_COLOR": "光束颜色",
+  "THRUST_COLOR": "推进器颜色",
+  "BEAM_WIDTH": "光束粗细",
+  "CLASH_TIME": "交锋时长",
+  "THRUST_TIME": "推进时长",
+  "THRUST_LENGTH": "推进长度",
+  "SHOT_TIME": "射击时长",
+  "SHEEN_PERIOD": "反光间隔",
+  "GLINT_PERIOD": "眼睛闪光间隔",
+  "HOLO_COLOR": "全息颜色",
+  "GRID": "网格强度",
+  "SCAN_TIME": "扫描时长",
+  "GRID_SPACING": "网格间距",
+  "PRINT_TIME": "成像时长",
+  "STREAK_TIME": "扫描轨迹时长",
+  "CURSOR_ALPHA": "光标不透明度",
+  "SCANLINE_GAP": "扫描线间距",
+  "BAND_PERIOD": "光带间隔",
+  "FLICKER_PERIOD": "闪烁间隔",
+  "PULSE_REACH": "数据包距离",
+  "TYPE_BEAM": "写入光束",
+  "TYPE_KICK": "光标扫描",
+  "TYPE_PULSE": "打字数据包",
+  "WORD_DECODE": "单词解密",
+  "WORD_WAVE": "单词解密间隔",
+  "TYPE_EMBERS": "打字余烬数",
+  "TYPE_RADIUS": "打字半径",
+  "TYPE_SPLIT": "打字分开距离",
+  "TYPE_STRENGTH": "打字强度",
+  "TYPE_SWEEP": "打字斩击时长",
+  "TYPE_TIME": "打字效果时长",
+  "TYPING_LINE_SPARK": "打字火花连线",
+  "WAVE_RADIUS": "波半径",
+  "WAVE_TIME": "波时长",
+  "WISP_TIME": "光丝时长",
+  "TYPE_EFFECT": "打字特效",
+  "LINE_TINT": "线条着色",
+  "BACK_THRUST": "退格推进",
+  "PHRASE_EFFECT": "中文输入",
+  "ARMOR_BLUE": "装甲蓝",
+  "ARMOR_RED": "装甲红",
+  "ARMOR_YELLOW": "装甲黄"
+ },
+ "comments": {
+  "beam the input box lines up on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时把输入框线条向上传送（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "beam when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时传送（`cursor-fx jumps on|off`）",
+  "big burst when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时大爆发（`cursor-fx jumps on|off`）",
+  "biggest sideways jump of a slice, in character widths": "切片横向跳动的最大距离，单位：字符宽度",
+  "brightness of the smaller, slower rain layer behind (0 = none)": "后方那层更小更慢的字符雨亮度（0 = 不显示）",
+  "color fringing at the ring (0 = none)": "圆环处的色边（0 = 无）",
+  "curtains along the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时沿输入框线条展开光幕（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "cut the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时斩开输入框线条（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "ember radius, in character heights": "余烬半径，单位：字符高度",
+  "embers off the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时从输入框线条飞出余烬（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "embers per keystroke": "每次按键的余烬数",
+  "flicker steps per second": "每秒闪烁次数",
+  "full burst when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时完整爆发（`cursor-fx jumps on|off`）",
+  "full ring when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时完整圆环（`cursor-fx jumps on|off`）",
+  "fuse and fireworks on the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时在输入框线条上点燃引信并放烟花（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "glitch the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时让输入框线条出现故障效果（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "glow around each ember, in character heights": "每个余烬周围的光晕，单位：字符高度",
+  "glow left while the cursor is blinked off": "光标闪烁熄灭时保留的余光",
+  "glyph height, in character heights": "字符高度（相对于终端字符高度）",
+  "glyphs in a column's trail": "每列拖尾中的字符数",
+  "halo around the cursor: falloff, in character heights": "光标周围光晕的衰减，单位：字符高度",
+  "how dark the scanlines get (0 = none)": "扫描线的暗度（0 = 无）",
+  "how far from the cut the text moves, in character heights": "文字离开切口的距离，单位：字符高度",
+  "how far the halo reaches sideways, relative to up and down (keeps the letters beside the cursor clear)": "光晕横向延伸的程度，相对于上下方向（让光标旁边的字保持清晰）",
+  "how fast a column falls, in character heights per second": "每列下落速度，每秒字符高度",
+  "how fast the colors drift, in cycles per second": "颜色流动速度，每秒周期数",
+  "how high the curtains reach above a line, in character heights": "光幕在线条上方的高度，单位：字符高度",
+  "how much the breath dims the glow (0 = steady)": "呼吸时光晕变暗的程度（0 = 恒定）",
+  "how strong the box lines' own look is": "输入框线条外观的强度",
+  "how strong the cursor's own look is": "光标外观的强度",
+  "launch when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时发射（`cursor-fx jumps on|off`）",
+  "light the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时点亮输入框线条（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "long re-ignite when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时较长的重新点亮（`cursor-fx jumps on|off`）",
+  "long trail when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时留下长拖尾（`cursor-fx jumps on|off`）",
+  "longest side branch, in character heights": "最长的侧分支，单位：字符高度",
+  "outline distance inside the block's edge, in character heights (the cursor stays one character wide)": "轮廓距光标块边缘向内的距离，单位：字符高度（光标保持一个字符宽）",
+  "outline thickness, in character heights": "轮廓粗细，单位：字符高度",
+  "overall strength of the light": "整体亮度",
+  "play it again, from the edges inward, when Claude finishes answering (Stop hook) or a long zsh command ends": "Claude 回答完毕（Stop hook）或较长的 zsh 命令结束时，从边缘向内再播放一次",
+  "play them again, from the edges inward, when Claude finishes answering (Stop hook) or a long zsh command ends": "Claude 回答完毕（Stop hook）或较长的 zsh 命令结束时，从边缘向内再播放一次",
+  "pulse along the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时沿输入框线条发出脉冲（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "rain again, starting at the edges, when Claude finishes answering (Stop hook) or a long zsh command ends": "Claude 回答完毕（Stop hook）或较长的 zsh 命令结束时，从边缘开始再下一次字符雨",
+  "rain through the input box on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时字符雨穿过输入框（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "ring thickness, in character heights": "圆环粗细，单位：字符高度",
+  "scanline spacing, in pixels": "扫描线间距，单位：像素",
+  "seconds a band takes to pass the cursor": "光带扫过光标所需秒数",
+  "seconds a bolt flickers": "闪电闪烁的秒数",
+  "seconds a glint takes to cross the cursor": "闪光扫过光标所需秒数",
+  "seconds a stray ember lives": "飘出余烬的存在秒数",
+  "seconds an ember lives (each one varies a little)": "余烬的存在秒数（每个略有不同）",
+  "seconds between refresh bands": "两次刷新光带之间的秒数",
+  "seconds per slow breath": "每次缓慢呼吸的秒数",
+  "seconds the beam takes from the old position to the new one": "光束从旧位置到新位置所需秒数",
+  "seconds the curtains last": "光幕持续的秒数",
+  "seconds the lit lines last": "线条点亮持续的秒数",
+  "seconds the rain lasts": "字符雨持续的秒数",
+  "seconds the sparks live": "火花存在的秒数",
+  "seconds until the cut has closed again": "切口重新合上所需秒数",
+  "share of the columns that rain": "下雨的列所占比例",
+  "side branches per bolt": "每道闪电的侧分支数",
+  "slash when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时斩击（`cursor-fx jumps on|off`）",
+  "slices per character height": "每个字符高度内的切片数",
+  "small flashing blocks around the cursor": "光标周围闪烁的小方块",
+  "soft glow around the cursor, in character heights": "光标周围的柔和光晕，单位：字符高度",
+  "sparkle changes per second": "每秒闪光变化次数",
+  "sparks in a burst (at most 32)": "一次爆发的火花数（最多 32）",
+  "sparks per keystroke": "每次按键的火花数",
+  "strength of the glow around the cursor": "光标周围光晕的强度",
+  "strike a bolt when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时劈下一道闪电（`cursor-fx jumps on|off`）",
+  "surge along the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时电流沿输入框线条奔涌（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "sweep a ribbon when the cursor jumps along its row (`cursor-fx jumps on|off`)": "光标沿行跳跃时扫出一条光带（`cursor-fx jumps on|off`）",
+  "sweep the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时光束扫过输入框线条（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "the cursor's motion while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时光标的动态（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the cursor's own look: a burning coal: a glow, and hot cracks shifting across it": "光标自身的外观：一块燃烧的炭：发光，热裂纹在表面游走",
+  "the cursor's own look: a corrupted signal: color channels split and jittering, tearing now and then": "光标自身的外观：受损的信号：颜色通道分离抖动，时不时撕裂",
+  "the cursor's own look: a matter stream: twinkling pixels, drifting bands, a shimmering edge": "光标自身的外观：物质流：闪烁的像素、漂移的光带、微光闪动的边缘",
+  "the cursor's own look: a sparkler: tiny colored stars flare around its top": "光标自身的外观：手持烟花：顶部闪出彩色小星星",
+  "the cursor's own look: charged, small arcs of current jumping around it": "光标自身的外观：带电，细小的电弧在周围跳动",
+  "the cursor's own look: glyph rain inside the block, a sweeping scanline, a soft glow": "光标自身的外观：光标块内的字符雨、扫过的扫描线、柔和光晕",
+  "the cursor's own look: northern lights drifting inside it, with a glow in the same colors": "光标自身的外观：极光在其中流动，光晕也是同样的颜色",
+  "the cursor's own look: phosphor glow, scanlines and the rolling refresh band": "光标自身的外观：荧光、扫描线和滚动的刷新光带",
+  "the cursor's own look: polished steel: a bevel, brushed grain and a slow sheen": "光标自身的外观：抛光钢：斜面、拉丝纹理和缓慢的光泽",
+  "the cursor's own look: resonance: faint rims ripple out, the block pulses softly": "光标自身的外观：共振：淡淡的涟漪向外扩散，光标块轻轻脉动",
+  "the cursor's own look: the glowing tube and its breathing halo": "光标自身的外观：发光的灯管和呼吸般的光晕",
+  "the faint idle crackle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时轻微的噼啪声（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the faint shimmer on the cursor while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时光标上的淡淡微光（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the glint while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时的闪光（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the glitch pattern changes this many times per second": "故障图案每秒变化的次数",
+  "the input box lines, always: a live wire: current flowing along them, a spark running across now and then": "输入框线条，常驻：通电的导线：电流沿线流动，不时有火花跑过",
+  "the input box lines, always: a slow fuse burning along, throwing sparks": "输入框线条，常驻：缓慢燃烧的引信，迸出火花",
+  "the input box lines, always: a teal glow with particles twinkling along": "输入框线条，常驻：青色光芒，粒子沿线闪烁",
+  "the input box lines, always: an unstable feed: a magenta and a cyan echo, segments jumping now and then": "输入框线条，常驻：不稳定的信号：洋红和青色的残影，线段不时跳动",
+  "the input box lines, always: data buses: faint dashes streaming along": "输入框线条，常驻：数据总线：淡淡的短划线沿线流动",
+  "the input box lines, always: dim neon tubes that breathe with the cursor": "输入框线条，常驻：暗淡的霓虹灯管，随光标一起呼吸",
+  "the input box lines, always: hot wires: glowing, hot spots drifting, an ember rising now and then": "输入框线条，常驻：炽热的金属丝：发光，热点漂移，不时升起余烬",
+  "the input box lines, always: phosphor traces with a blip sweeping along": "输入框线条，常驻：荧光轨迹，一个亮点沿线扫过",
+  "the input box lines, always: resonating strings: a slow wave travels along them": "输入框线条，常驻：共振的琴弦：缓慢的波沿线传播",
+  "the input box lines, always: ribbons of aurora colors drifting along, a faint glow above": "输入框线条，常驻：极光色的光带沿线流动，上方有淡淡光晕",
+  "the input box lines, always: steel edges with a glint sliding along": "输入框线条，常驻：钢刃：闪光沿线滑过",
+  "the prompt mark (❯) at the start of the cursor's line: a glowing ember: hot yellow-orange that flickers, a warm glow": "行首的提示符（❯）：发光的余烬：炽热的黄橙色闪动，暖色光晕",
+  "the prompt mark (❯) at the start of the cursor's line: a neon sign: a bright tube with a breathing pink halo": "行首的提示符（❯）：霓虹招牌：明亮的灯管和呼吸般的粉色光晕",
+  "the prompt mark (❯) at the start of the cursor's line: charged: ice-blue with a white-hot core that flickers, a spark running along it": "行首的提示符（❯）：带电：冰蓝色、白热的核心闪动，有火花沿它跑过",
+  "the prompt mark (❯) at the start of the cursor's line: glitching: its red and blue copies sit apart and jitter": "行首的提示符（❯）：故障：它的红色和蓝色副本分开抖动",
+  "the prompt mark (❯) at the start of the cursor's line: gold, with a sparkle twinkling at its tip": "行首的提示符（❯）：金色，尖端闪着一颗星光",
+  "the prompt mark (❯) at the start of the cursor's line: netrunner green, decrypting into a glyph now and then": "行首的提示符（❯）：网络行者绿，不时“解密”成一个字符",
+  "the prompt mark (❯) at the start of the cursor's line: phosphor: glowing green with scanlines": "行首的提示符（❯）：荧光：带扫描线的绿色光芒",
+  "the prompt mark (❯) at the start of the cursor's line: polished steel with a glint sweeping across it": "行首的提示符（❯）：抛光钢，有闪光扫过",
+  "the prompt mark (❯) at the start of the cursor's line: teal matter with twinkling pixels": "行首的提示符（❯）：青色物质，像素闪烁",
+  "the prompt mark (❯) at the start of the cursor's line: the northern lights drifting through it": "行首的提示符（❯）：极光在其中流动",
+  "the prompt mark (❯) at the start of the cursor's line: violet, sending out a slow ring": "行首的提示符（❯）：紫色，缓缓发出一圈波纹",
+  "the rain starts this far above the top box line, in character heights": "字符雨从上方框线以上这么高处开始，单位：字符高度",
+  "the refresh band rolling through the cursor while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时滚过光标的刷新光带（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the row dissolves into rain when the cursor jumps along it (`cursor-fx jumps on|off`)": "光标沿行跳跃时整行溶解成字符雨（`cursor-fx jumps on|off`）",
+  "the slow breath while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时缓慢的呼吸（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the small idle glitch between keystrokes (`cursor-fx idle on|off`; off keeps the screen calm)": "按键间隙的小故障（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the sonar ping while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时的声呐 ping（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the stray ember while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时飘出的余烬（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "energy blades ignite along the input box on Enter (`cursor-fx enter off` pauses every effect's Enter)": "回车时能量刃沿输入框点亮（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "two blades ignite at the window's edges and clash in the middle when Claude finishes answering (Stop hook) or a long zsh command ends": "Claude 回答完（Stop 钩子）或耗时较长的 zsh 命令结束时，两把能量刃从窗口两侧点亮，在中间交锋",
+  "an energy shot along the row when the cursor jumps along it (`cursor-fx jumps on|off`)": "光标在行内跳转时，沿这一行射出一发能量弹（`cursor-fx jumps on|off`）",
+  "the input box lines, always: HUD rails with tick marks and a slow scan": "输入框线条，常驻显示：带刻度的 HUD 导轨和缓慢扫过的光",
+  "seconds the blades stay lit": "能量刃保持点亮的秒数",
+  "seconds a blade takes to reach its full length": "能量刃伸到全长所用的秒数",
+  "the white-hot core's thickness, in character heights": "白热刀芯的粗细，以字符高度为单位",
+  "the pink glow around it, in character heights": "刀芯周围粉色光晕的大小，以字符高度为单位",
+  "seconds a thruster burst lasts": "一次推进器喷射持续的秒数",
+  "seconds an energy shot, its trail and its rings last": "一发能量弹及其尾迹和光环持续的秒数",
+  "the input box turns into a hologram on Enter: a scan runs out from the cursor and a wireframe grid flickers in (`cursor-fx enter off` pauses every effect's Enter)": "回车时输入框变成全息影像：扫描从光标向外展开，线框网格闪烁显现（`cursor-fx enter off` 会暂停所有特效的回车效果）",
+  "the scan comes in from both edges and pulses where they meet when Claude finishes answering (Stop hook) or a long zsh command ends": "Claude 回答完（Stop 钩子）或耗时较长的 zsh 命令结束时，扫描从两侧向内展开，在相遇处闪一下",
+  "a scan streak along the row when the cursor jumps along it (`cursor-fx jumps on|off`)": "光标在行内跳转时，沿这一行留下一道扫描轨迹（`cursor-fx jumps on|off`）",
+  "the cursor's drifting band and its rare flicker, the prompt's flicker (`cursor-fx idle on|off`; off keeps the screen calm)": "光标上缓缓上移的光带和偶尔的闪烁，以及提示符的闪烁（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the cursor's own look: a translucent cyan projection with scanlines, a bright base and a thin frame": "光标自身的外观：半透明的青色投影，带扫描线、明亮的底座和细边框",
+  "the prompt mark (❯) at the start of the cursor's line: projected in cyan, interlaced": "光标所在行开头的提示符（❯）：青色隔行投影",
+  "the input box lines, always: projected edges with a glint running along": "输入框线条，常驻显示：投影出的边缘，有一道光沿线掠过",
+  "seconds the hologram lasts": "全息影像持续的秒数",
+  "seconds the scan takes to reach the window's edge": "扫描到达窗口边缘所用的秒数",
+  "the grid's columns, in characters": "网格的列距，以字符为单位",
+  "seconds a letter takes to print": "一个字母成像所用的秒数",
+  "seconds a jump's streak lasts": "跳转留下的轨迹持续的秒数",
+  "how solid the projected cursor looks (1 = as solid as a plain cursor)": "投影光标看起来有多实（1 = 和普通光标一样实）",
+  "pixels from one scanline to the next": "相邻扫描线之间的像素数",
+  "a band of light drifts up the cursor once every this many seconds": "每隔这么多秒，一道光带从光标上缓缓上移",
+  "typing a space: the word you just finished re-decrypts, left to right": "打空格：刚打完的单词从左到右重新解密一遍",
+  "word decrypt: seconds from one letter to the next": "单词解密：从一个字母到下一个字母的间隔秒数",
+  "Chinese input: seconds a character or phrase you pick takes to decrypt, all of it (quicker than a letter's, so you can read along)": "中文输入：选定的字或词组整体解密所用的秒数（比英文字母快，方便边打边看）",
+  "your text in the cursor's color (Claude Code's input box and your sent prompts, zsh's command line), as easy to read as the terminal's text; dim and colored text stay as they are": "你的文字显示为光标颜色（Claude Code 输入框和已发送的提示、zsh 命令行），清晰度与终端文字相同；暗色和彩色文字保持原样",
+  "Backspace fires a burst from the cursor's right side as it backs up": "退格时，光标后退并从右侧喷出一股推进器尾焰",
+  "a faint sparkle shimmers over the cursor as you type": "打字时光标上泛起淡淡的闪光",
+  "a scan beam sweeps the decrypted letter and burns it in (glyph flicker style)": "一道扫描光束扫过解密后的字母，把它烧进屏幕（字符闪烁样式）",
+  "a scanline runs down the cursor with a pulse of glow": "一条扫描线划过光标，伴随一阵光晕",
+  "a short thruster burst fires behind the cursor as you type": "打字时光标后方喷出一小股推进器尾焰",
+  "a wisp of aurora light rises off the cursor and drifts away": "一缕极光从光标升起并飘走",
+  "each character you type decrypts (Chinese you pick decrypts as a whole)": "输入的每个字符都会先被“解密”（中文选词后整词解密）",
+  "each key sends two data packets along the input box lines, away from the cursor": "每次按键沿输入框线条向两侧发出两个数据包",
+  "each keystroke also throws a spark from the cursor to a box line": "每次按键还从光标向框线甩出一道火花",
+  "each letter you type is printed by a scanline rising through its cell (Chinese as a whole)": "输入的每个字母由一条上升的扫描线逐行打印出来（中文整体打印）",
+  "embers along the box lines (at most 32)": "沿框线的余烬数量（最多 32）",
+  "embers on a jump (at most 16)": "跳跃时的余烬数量（最多 16）",
+  "every keystroke kicks up glowing embers that rise and cool": "每次按键激起发光的余烬，升起并逐渐冷却",
+  "every keystroke sends out a small ring that bends the text": "每次按键发出一个小波环，让文字微微弯曲",
+  "every keystroke slashes the cursor corner to corner and its halves part for an instant": "每次按键一刀斜劈光标，两半瞬间分开",
+  "glyph rows scrolling down inside the cursor per second": "光标内部每秒向下滚动的字符行数",
+  "how bright a ping's ring is": "声呐波环的亮度",
+  "how bright a ring's edge is": "波环边缘的亮度",
+  "how bright the glow around the cursor is": "光标周围光晕的亮度",
+  "how bright the halo is": "光晕的亮度",
+  "how bright the trail is": "拖尾的亮度",
+  "how bright the tube outline is": "灯管轮廓的亮度",
+  "how close to a box line pixels light up, in character heights": "离框线多近的像素会亮起，单位：字符高度",
+  "how close to a box line pixels take part, in character heights": "离框线多近的像素参与效果，单位：字符高度",
+  "how close to a box line the surge lights pixels, in character heights": "电流点亮离框线多近的像素，单位：字符高度",
+  "how close to the lines the pulse bends text, in character heights": "脉冲让离线条多近的文字弯曲，单位：字符高度",
+  "how each letter decrypts: 0 glyph flicker, 1 slot reel, 2 pixel resolve, 3 signal lock-in": "每个字母的解密方式：0 字符闪烁，1 老虎机滚轮，2 像素成形，3 信号锁定",
+  "how far a bolt wanders sideways, as a share of its length": "闪电横向偏移的幅度，占其长度的比例",
+  "how far a jump's shockwave travels, in character heights": "跳跃冲击波传播的距离，单位：字符高度",
+  "how far a keystroke's ring travels, in character heights": "按键波环传播的距离，单位：字符高度",
+  "how far a ping travels, in character heights": "声呐波环传播的距离，单位：字符高度",
+  "how far a ring pushes the text, in character heights": "波环推动文字的距离，单位：字符高度",
+  "how far its sparks fly, in character heights": "火花飞散的距离，单位：字符高度",
+  "how far pieces of the box lines jump up or down, in character heights": "框线碎片上下跳动的距离，单位：字符高度",
+  "how far the cursor's halves part along the cut, in character heights": "光标两半沿切口分开的距离，单位：字符高度",
+  "how far the cut runs past both ends, as a share of its length": "切口超出两端的长度，占其长度的比例",
+  "how far the exhaust reaches, in characters": "尾焰的长度，单位：字符",
+  "how far the glow reaches, in character heights": "光晕的范围，单位：字符高度",
+  "how far the line crackles either side of where that spark lands, in characters": "火花落点两侧框线噼啪作响的范围，单位：字符",
+  "how far the magenta and cyan copies split off, in character widths": "洋红和青色残影分开的距离，单位：字符宽度",
+  "how far the packets travel, in characters": "数据包飞出的距离，单位：字符",
+  "how far the soft outer part of the cursor's glow reaches, in character heights": "光标光晕外圈柔光的范围，单位：字符高度",
+  "how far the stream curves, as a share of the distance": "粒子流弯曲的幅度，占距离的比例",
+  "how far the two sides of a cut part, in character heights": "切口两侧分开的距离，单位：字符高度",
+  "how far they slide along the cut, in character heights": "两侧沿切口滑开的距离，单位：字符高度",
+  "how fast embers start rising, in character heights per second": "余烬起始上升速度，单位：字符高度/秒",
+  "how fast sparks fall, in character heights per second squared": "火花下落的加速度，单位：字符高度/秒²",
+  "how fast they drift sideways, in character heights per second (more after a jump)": "余烬横向飘移的速度，单位：字符高度/秒（跳跃后更快）",
+  "how high a firework bursts, in character heights": "烟花炸开的高度，单位：字符高度",
+  "how likely a stray ember is each time it gets a chance (0 to 1)": "每次机会出现零星余烬的概率（0 到 1）",
+  "how likely the faint idle crackle is each time it gets a chance (0 to 1)": "每次机会出现空闲噼啪声的概率（0 到 1）",
+  "how likely the idle shimmer is each time it gets a chance (0 to 1)": "每次机会出现空闲微光的概率（0 到 1）",
+  "how likely the small idle glitch is each time it gets a chance (0 to 1)": "每次机会出现空闲小故障的概率（0 到 1）",
+  "how much darker than the block those glyphs are": "这些字符比光标块暗多少",
+  "how much of the cursor's color the lines take, at their own brightness": "线条带上多少光标颜色，亮度保持不变",
+  "how much of the cursor's color your text takes": "你的文字带上多少光标颜色",
+  "how much of the cursor's glow hugs the block (the rest spreads out)": "光标光晕中紧贴光标块的比例（其余向外扩散）",
+  "how strong a keystroke's tear is, compared with a jump's full burst": "按键撕裂的强度，相对于跳跃时的完整爆发",
+  "how strong an idle glitch is, compared with a move's": "空闲故障的强度，相对于移动时的故障",
+  "how strong the wireframe grid is": "线框网格的强度",
+  "how visible the dissolving trace at the old position is": "旧位置上消散残影的明显程度",
+  "how visible the magenta and cyan copies are": "洋红和青色残影的明显程度",
+  "moves this long or longer are a jump (in characters; a row counts as two)": "移动达到这个长度即算跳跃（单位：字符；一行算两个）",
+  "moves this long or longer get the full burst (in characters)": "移动达到这个长度即完整爆发（单位：字符）",
+  "moves this long or longer launch a firework (in characters; a row counts as two)": "移动达到这个长度即发射烟花（单位：字符；一行算两个）",
+  "moves this long or longer teleport (in characters; a row counts as two)": "移动达到这个长度即传送（单位：字符；一行算两个）",
+  "pixels beamed up from the box lines (at most 32)": "从框线向上传送的像素数（最多 32）",
+  "seconds a glitch burst lasts after the cursor moves": "光标移动后故障爆发持续的秒数",
+  "seconds a jump's shockwave lasts": "跳跃冲击波持续的秒数",
+  "seconds a keystroke's ring lasts": "按键波环持续的秒数",
+  "seconds a ping lasts": "声呐波环持续的秒数",
+  "seconds a pixel takes to cross a jump": "像素穿过跳跃距离所需秒数",
+  "seconds a rocket flies before it bursts": "火箭炸开前飞行的秒数",
+  "seconds a wisp lasts": "光丝持续的秒数",
+  "seconds an idle crackle lasts": "空闲噼啪声持续的秒数",
+  "seconds an idle glitch lasts": "空闲故障持续的秒数",
+  "seconds an idle shimmer lasts": "空闲微光持续的秒数",
+  "seconds between a stray ember's chances": "两次零星余烬机会之间的秒数",
+  "seconds between idle glints": "两次空闲闪光之间的秒数",
+  "seconds between idle sonar pings": "两次空闲声呐之间的秒数",
+  "seconds between scanlines sweeping down the cursor": "两次扫描线划过光标之间的秒数",
+  "seconds between sheens across the armor": "两次装甲光泽之间的秒数",
+  "seconds between the idle crackle's chances": "两次空闲噼啪声机会之间的秒数",
+  "seconds between the idle glitch's chances": "两次空闲故障机会之间的秒数",
+  "seconds between the idle shimmer's chances": "两次空闲微光机会之间的秒数",
+  "seconds between the projection's brief flickers": "两次投影短暂闪烁之间的秒数",
+  "seconds each end of the beam sparkles": "光束两端闪烁的秒数",
+  "seconds over which the pixels leave": "像素陆续离开所用的秒数",
+  "seconds per breath of the cursor's glow": "光标光晕每次呼吸的秒数",
+  "seconds the Enter glitch lasts": "回车故障持续的秒数",
+  "seconds the beam takes from the cursor to the edges": "光束从光标扫到两侧边缘所需秒数",
+  "seconds the blade takes from the cursor to the edges": "刀锋从光标划到两侧边缘所需秒数",
+  "seconds the blade takes to cross the cursor": "刀锋划过光标所需秒数",
+  "seconds the blade takes to cross the jump": "刀锋划过跳跃距离所需秒数",
+  "seconds the character you typed stays hidden behind glyphs": "输入的字符藏在“密文”后面的秒数",
+  "seconds the cursor must stay put before an effect starts": "光标需要停留多少秒，特效才开始",
+  "seconds the fuse takes from the cursor to the edges": "引信从光标烧到两侧边缘所需秒数",
+  "seconds the glitch takes to spread from the cursor to the edges": "故障从光标扩散到两侧边缘所需秒数",
+  "seconds the heat takes to run from the cursor to the edges": "热量从光标传到两侧边缘所需秒数",
+  "seconds the ignition takes to run from the cursor to the edges": "点亮从光标传到两侧边缘所需秒数",
+  "seconds the light takes to run from the cursor to the edges": "光从光标传到两侧边缘所需秒数",
+  "seconds the pulse takes to reach the edges and fade": "脉冲到达边缘并消失所需秒数",
+  "seconds the rain's start takes to spread from the cursor to the edges": "字符雨的起点从光标扩散到两侧边缘所需秒数",
+  "seconds the ribbon takes to sweep the path and fade": "光带扫过路径并消失所需秒数",
+  "seconds the row's rain lasts": "整行字符雨持续的秒数",
+  "seconds the shimmer lasts": "闪光持续的秒数",
+  "seconds the sparkle takes to run from the cursor to the edges": "闪光从光标传到两侧边缘所需秒数",
+  "seconds the sparkles last": "小火花持续的秒数",
+  "seconds the sparks last": "火花持续的秒数",
+  "seconds the sparks last where the two blades meet (done)": "两把能量刃交锋处火花持续的秒数（完成时）",
+  "seconds the surge and its glow last": "电流及其光晕持续的秒数",
+  "seconds the surge's head takes to cross the window": "电流前端穿过窗口所需秒数",
+  "seconds the trail takes to fade to about a third": "拖尾衰减到约三分之一所需秒数",
+  "seconds the tube flickers after a jump (a keystroke gets 0.08)": "跳跃后灯管闪烁的秒数（按键为 0.08）",
+  "seconds the typing light lasts (packets, word wave)": "打字光效持续的秒数（数据包、单词波）",
+  "seconds until the cursor's halves have joined again": "光标两半重新合上所需秒数",
+  "seconds until the cut along the lines has closed": "框线上的切口合上所需秒数",
+  "seconds until the last Enter ember is out": "最后一颗回车余烬熄灭所需秒数",
+  "seconds until the last firework is out": "最后一朵烟花熄灭所需秒数",
+  "seconds until the last pixel is gone": "最后一个像素消失所需秒数",
+  "seconds until the lines' glow is gone": "线条光晕完全消失所需秒数",
+  "sparks fly off the cursor with every keystroke": "每次按键都有火花从光标飞出",
+  "the beam leaves a short fading trail as the cursor moves": "光标移动时，电子束留下一段渐隐的拖尾",
+  "the energy blades' glow": "能量刃的光晕",
+  "the blade's thickness, in character heights": "刀锋的粗细，单位：字符高度",
+  "the color the rain fades to toward the end of its trail": "字符雨拖尾末端渐变到的颜色",
+  "the cursor tears into slices with magenta and cyan copies as you type": "打字时光标裂成切片，带洋红和青色残影",
+  "the glow around the blade, in character heights": "刀锋周围的光晕，单位：字符高度",
+  "the glow of the bolts and sparks": "闪电和火花的光晕颜色",
+  "the glyphs near the head of each rain column": "每列字符雨头部的字符颜色",
+  "the halo around the lit lines, in character heights": "亮起线条周围的光晕，单位：字符高度",
+  "the hot core's thickness, in character heights": "炽热核心的粗细，单位：字符高度",
+  "the input box lines take the cursor's color (a plain color, no glow)": "输入框线条采用光标颜色（纯色，不发光）",
+  "the most a bolt wanders sideways, in character heights": "闪电横向偏移的上限，单位：字符高度",
+  "the most the cut runs past its ends, in character heights": "切口超出两端的上限，单位：字符高度",
+  "the most the stream curves, in character heights": "粒子流弯曲的上限，单位：字符高度",
+  "the pixels' size, in character heights": "像素大小，单位：字符高度",
+  "the projection's light": "投影光的颜色",
+  "the blades' white-hot core": "能量刃白热的核心",
+  "the same after a jump (gives the Enter signal time to arrive)": "跳跃后需要停留的秒数（给回车信号留出到达时间）",
+  "the steady warm glow around the cursor": "光标周围稳定的暖光",
+  "the thrusters' exhaust": "推进器尾焰",
+  "the tube flickers back on after every keystroke": "每次按键后灯管闪烁着重新亮起",
+  "their hot center": "闪电炽热的中心",
+  "tiny colored sparkles pop off the top of the cursor": "光标顶部迸出彩色小火花",
+  "picking a character or phrase from your input method plays the typing effect too (like one keystroke)": "用输入法选定字或词时也播放打字特效（和按一次键一样）",
+  "the prompt mark (❯) at the start of the cursor's line: a steel-blue targeting chevron that locks on now and then": "光标所在行开头的提示符（❯）：钢蓝色的瞄准标记，不时锁定一下",
+  "the chest band": "胸前色带",
+  "the lower plate": "下方装甲板",
+  "the V crest": "V 字天线",
+  "seconds between the eyes' glints": "两次眼睛闪光之间的秒数",
+  "the armor's sheen, the eyes' glint and the prompt's lock-on while idle (`cursor-fx idle on|off`; off keeps the screen calm)": "空闲时装甲的反光、眼睛的闪光和提示符的锁定（`cursor-fx idle on|off`；关闭可让屏幕更安静）",
+  "the cursor's own look: robot armor, white with blue and red plates, a yellow V crest and sensor eyes": "光标自身的外观：机甲装甲，白色配蓝红装甲板、黄色 V 字天线和传感器眼睛"
+ },
+ "effects": {
+  "aurora": [
+   "极光",
+   "光标里流动着绿、青、紫的极光色；打字时飘出一缕光丝，沿行跳跃时扫出一条光带。回车：绿、青、紫的光幕沿输入框线条从光标处展开；完成时从边缘向内。"
+  ],
+  "mecha": [
+   "机甲",
+   "机甲风格：光标是白色装甲配蓝红装甲板、黄色 V 字天线和传感器眼睛，打字时身后喷出推进器尾焰，退格时从右侧喷出。提示符 ❯ 是钢蓝色的瞄准标记，不时锁定一下。回车：能量刃从光标沿输入框线条点亮；完成：两把能量刃从两侧点亮，在中间交锋。"
+  ],
+  "hologram": [
+   "全息",
+   "光标是半透明的青色投影，带扫描线和细边框；每个输入的字母由一条上升的扫描线逐行成像。回车：扫描从光标沿输入框展开，框线亮起，线框网格闪烁显现；完成：扫描从两侧向内，在中间相遇。"
+  ],
+  "cyber": [
+   "赛博",
+   "网络行者绿的数据雨；光标是活的（内部字符雨、扫描线、呼吸光晕），每个输入的字符都会先被“解密”（中文选词后整词快速解密），你的输入和已发送的提示显示为绿色。回车：清晰的字符雨按字符格逐列落进输入框，一道能量沿框线扫过；完成：两道扫光从两侧向内，在中间相遇时闪亮。"
+  ],
+  "embers": [
+   "余烬",
+   "光标是一块燃烧的炭，热裂纹在表面游走；打字激起发光的余烬，升起并由黄变红地冷却。回车：输入框线条被烧热发光，洒落一阵余烬。"
+  ],
+  "fireworks": [
+   "烟花",
+   "光标像手持烟花，顶部闪着小星星；打字时迸出彩色小火花。回车：引信从光标沿输入框线条燃起，途中放出三朵烟花。"
+  ],
+  "glitch": [
+   "故障",
+   "光标是一路受损的信号，时不时撕裂；打字时光标裂成切片并带洋红/青色残影，空闲时偶尔小故障。回车：输入框线条从光标处向外裂成故障切片。"
+  ],
+  "katana": [
+   "武士刀",
+   "光标是抛光的钢，泛着缓慢的光泽；每次按键都有一刀从角到角斩过光标，两半瞬间分开、火花飞溅。回车：刀锋从光标沿输入框线条扫过，把线条斩成两半后又合上。"
+  ],
+  "lightning": [
+   "闪电",
+   "光标带着细小的电弧；打字时冒出火花，空闲时轻微噼啪，全删时沿整行劈下一道闪电。回车：电流从光标沿输入框线条奔涌而出。"
+  ],
+  "neon": [
+   "霓虹",
+   "光标像一根缓慢呼吸的粉色霓虹灯管，每次按键后都会闪一下重新点亮。回车：输入框线条像霓虹灯管一样从光标处依次点亮。"
+  ],
+  "phosphor": [
+   "荧光",
+   "复古 CRT 风格：绿色荧光和扫描线，打字时留下短暂消退的光束拖尾。回车：CRT 光束从光标沿输入框线条扫过，留下余辉。"
+  ],
+  "shockwave": [
+   "冲击波",
+   "光标带着淡淡的共振涟漪；打字时发出一个让文字弯曲的小环，空闲时像声呐一样轻轻一响。回车：一道脉冲从光标沿输入框线条传开，让旁边的文字弯曲。"
+  ],
+  "teleport": [
+   "传送",
+   "光标像传送光束一样闪烁；打字时泛起细小闪光。回车：输入框线条闪闪发光，然后碎成发光像素向上传送出窗口。"
+  ]
+ }
+}
+
+PANEL_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cursor effects</title>
+<style>
+  /* Text sits at 8.5-9.5:1 and notes at 7.4-8:1 against their backgrounds (easy on astigmatic
+     eyes); the effect's own color marks what is on and what is selected, never small text. */
+  :root { --bg: #1a1a1e; --surface: #232328; --raised: #2c2c32; --line: #34343b; --text: #c3bfb5; --muted: #b6b2a9; --accent: #9fd0fe; --knob: #16161a; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  /* Nothing in the header changes size: the status pill has a fixed width and cuts long text, so the switches never move. */
+  header { flex: none; display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--line); background: var(--bg); }
+  header h1 { font-size: 16px; margin: 0 auto 0 0; font-weight: 650; white-space: nowrap; color: var(--text); }
+  .globals { display: flex; align-items: center; gap: 18px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 10px; }
+  .globals > span { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  header .switch { white-space: nowrap; flex: none; }
+  header #status { flex: 0 0 330px; min-width: 0; }
+  header #status span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: var(--text); font-size: 13px; }
+  .switch input { appearance: none; width: 36px; height: 21px; border-radius: 11px; background: #45454d; position: relative; margin: 0; cursor: pointer; transition: background .15s; flex: none; }
+  .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%; background: #d8d4ca; transition: left .15s; }
+  .switch input:checked { background: var(--accent); }
+  .switch input:checked::after { left: 18px; background: var(--knob); }
+  .switch input:indeterminate { background: linear-gradient(90deg, var(--accent) 50%, #45454d 50%); }
+  .switch input:indeterminate::after { left: 10.5px; }
+  .switch .state { display: inline-block; min-width: 2em; color: var(--muted); }
+  /* Three panes under the header, each scrolling on its own: the list, the stage, the settings.
+     A pane that reaches its end stops there (no handing the scroll to the page, no bounce). */
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(480px, 1.1fr) minmax(400px, 1fr); grid-template-rows: minmax(0, 1fr); }
+  #detail { display: contents; }
+  aside, .stage, .knobs { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .stage { padding: 20px; min-width: 0; }
+  .knobs { min-width: 0; display: flex; flex-direction: column; gap: 26px; padding: 20px 20px 48px; border-left: 1px solid var(--line); }
+  .knobs > .sec { flex: none; }
+  * { scrollbar-width: thin; scrollbar-color: #45454d transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #3c3c44; border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background-color: #50505a; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @media (max-width: 1180px) { main { grid-template-columns: 248px minmax(0, 1fr); } #detail { display: block; min-height: 0; overflow-y: auto; overscroll-behavior: contain; } .stage { overflow: visible; position: sticky; top: 0; z-index: 2; background: var(--bg); padding-bottom: 8px; } .knobs { overflow: visible; border-left: 0; } }
+  @media (max-width: 820px) { body { display: block; height: auto; overflow: auto; } main { display: block; } aside { flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; } #detail { overflow: visible; } .effect { width: calc(50% - 3px); } header #status { flex-basis: 100%; } }
+  /* The effect list: color, name, what it is in a few words. */
+  aside { display: flex; flex-direction: column; gap: 4px; padding: 16px 10px 24px; border-right: 1px solid var(--line); }
+  .effect { flex: none; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 0 11px; align-items: center; padding: 9px 11px; border: 1px solid transparent; border-radius: 10px; background: transparent; cursor: pointer; text-align: left; color: var(--text); font: inherit; }
+  .effect:hover { background: var(--surface); }
+  .effect.selected { background: var(--surface); border-color: var(--line); }
+  .effect .dot { width: 12px; height: 12px; border-radius: 50%; grid-row: span 2; }
+  .effect .name { font-weight: 600; }
+  .effect .tag { grid-column: 2; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .effect .badge { grid-row: 1; grid-column: 3; font-size: 11px; color: var(--text); border: 1px solid var(--accent); border-radius: 999px; padding: 0 7px; }
+  /* The stage: the effect, its two actions and the live preview, always in view. */
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+  .title { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; }
+  .title h2 { margin: 0 auto 0 0; font-size: 22px; font-weight: 650; color: var(--text); }
+  .title .actions { display: flex; gap: 8px; }
+  .desc { margin: 8px 0 14px; color: var(--muted); max-width: 70ch; }
+  .preview { position: relative; background: #000; border-radius: 10px; overflow: hidden; outline: none; cursor: text; box-shadow: 0 0 0 1px var(--line); transition: box-shadow .15s; }
+  .preview.focused { box-shadow: 0 0 0 2px var(--accent); }
+  .preview .pvzoom { transform-origin: 0 0; transition: transform .25s ease; }
+  .preview canvas { display: block; width: 100%; height: auto; }
+  .preview .kbd { position: absolute; top: 8px; right: 10px; padding: 3px 9px; border-radius: 6px; background: rgba(0,0,0,.65); color: var(--text); font-size: 12px; pointer-events: none; }
+  .preview .ime { position: absolute; width: 2px; padding: 0; border: 0; margin: 0; opacity: 0; resize: none; overflow: hidden; font-size: 16px; caret-color: transparent; pointer-events: none; }
+  .preview .err { position: absolute; inset: 0; padding: 14px; background: rgba(60,0,0,.85); color: #ffc2c2; font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow: auto; }
+  .pvbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 16px; margin-top: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pvopts { gap: 8px; } .pvopts .lbl { color: var(--muted); font-size: 12px; }
+  button { font: inherit; font-size: 13px; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 6px 13px; cursor: pointer; }
+  button:hover { background: #35353c; }
+  button.primary { border-color: var(--accent); }
+  button:disabled { cursor: default; color: var(--muted); border-color: var(--line); background: transparent; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+  .seg { display: flex; width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 3px; }
+  .seg button { flex: 1 1 0; min-width: 0; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg button:hover { background: var(--raised); color: var(--text); }
+  .seg button.on { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  .seg.small { width: auto; } .seg.small button { flex: none; padding: 4px 10px; }
+  /* Settings: one section per moment of the effect, in the same order for every effect. A section's
+     title carries its on/off switch; its settings sit in one inset group below; the rarely needed
+     ones fold under "More settings" inside the same section. A section that is off dims. */
+  .sec > .sechead { display: flex; align-items: center; gap: 12px; padding: 0 4px; }
+  .sec h3 { margin: 0 auto 0 0; font-size: 15.5px; font-weight: 650; color: var(--text); }
+  .sec h3::after { content: "●"; color: transparent; margin-left: 7px; font-size: 9px; vertical-align: 3px; }
+  .sec > .sechead.changed h3::after { color: var(--accent); }
+  .sec > .secdesc { margin: 4px 4px 10px; color: var(--muted); font-size: 13px; }
+  .sec > .sechead + .group { margin-top: 10px; }
+  .group { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 0 16px; }
+  .sec.off > .group, .sec.off > details { opacity: .45; }
+  .setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: center; padding: 11px 0; border-top: 1px solid var(--line); }
+  .group > .setting:first-child { border-top: 0; }
+  .setting > label { font-weight: 550; min-width: 0; }
+  .setting .foot { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-height: 18px; }
+  .setting .help { color: var(--muted); font-size: 12.5px; }
+  .setting.choice .control { grid-column: 1 / -1; }
+  .control { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: nowrap; }
+  input[type=range] { width: 150px; flex: none; accent-color: var(--accent); }
+  input[type=number], input[type=text] { font: inherit; font-size: 13px; width: 90px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; }
+  input[type=color] { width: 40px; height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); padding: 2px; cursor: pointer; }
+  .contrast { color: var(--muted); font-size: 12.5px; white-space: nowrap; } .contrast b { color: var(--text); }
+  .setting .val { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
+  /* The changed mark and the "was … ↺" note always take their space (hidden until a value changes), so rows never shift. */
+  .setting > label::after { content: "●"; color: transparent; margin-left: 6px; font-size: 9px; vertical-align: 2px; }
+  .setting.changed > label::after { color: var(--accent); }
+  .setting .was { color: var(--muted); font-size: 12px; white-space: nowrap; visibility: hidden; }
+  .setting.changed .was { visibility: visible; }
+  .setting .was button { padding: 1px 8px; font-size: 12px; margin-left: 4px; }
+  details.more { margin-top: 6px; }
+  details.more > summary { cursor: pointer; color: var(--muted); padding: 6px 4px; font-size: 13px; list-style: none; display: inline-flex; gap: 6px; align-items: center; border-radius: 6px; }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary::before { content: "›"; display: inline-block; transition: transform .15s; font-size: 15px; line-height: 1; }
+  details.more[open] > summary::before { transform: rotate(90deg); }
+  details.more > summary:hover { color: var(--text); }
+  details.more > .group { margin-top: 4px; }
+  .knobs > .hint { margin: -8px 4px 0; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #6a6a70; flex: none; }
+  .pill.saving::before { background: #e5b84a; }
+  .pill.saved::before { background: #8fd48a; }
+  .pill.error::before { background: #e07070; }
+  #toast { position: fixed; right: 20px; bottom: 20px; background: var(--raised); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; }
+  #toast.show { opacity: 1; }
+  #langBtn { min-width: 76px; }
+  code { font: 12px ui-monospace, Menlo, monospace; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="hTitle">Cursor effects</h1>
+  <div class="globals" role="group" aria-labelledby="lAll">
+    <span id="lAll">All effects</span>
+    <label class="switch" id="enterLabel"><input type="checkbox" id="enterSwitch"> <span id="lEnter">Enter & done</span></label>
+    <label class="switch" id="jumpsLabel"><input type="checkbox" id="jumpsSwitch"> <span id="lJumps">Delete-all</span></label>
+    <label class="switch" id="idleLabel"><input type="checkbox" id="idleSwitch"> <span id="lIdle">Idle animations</span></label>
+  </div>
+  <span class="pill" id="status"><span></span></span>
+  <button id="langBtn" type="button"></button>
+  <button id="doneBtn">Done</button>
+</header>
+<main>
+  <aside id="effects" aria-label="Effects"></aside>
+  <section id="detail"><div class="stage" id="stage"></div><div class="knobs" id="knobs"></div></section>
+</main>
+<div id="toast" role="status"></div>
+<script>
+const TOKEN = "__TOKEN__";
+let STATE = __STATE__;
+const $ = s => document.querySelector(s);
+const toastEl = $("#toast"); let toastTimer;
+function toast(msg) { toastEl.textContent = msg; toastEl.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2600); }
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN }, body: JSON.stringify(body || {}) });
+  const data = await r.json();
+  if (!r.ok || data.error) throw new Error(data.error || r.statusText);
+  return data;
+}
+const hexToRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const rgbToHex = c => "#" + c.map(v => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("");
+function luminance(h) { const f = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); const [r, g, b] = hexToRgb(h).map(f); return 0.2126 * r + 0.7152 * g + 0.0722 * b; }
+function contrast(a, b) { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+const fmtNum = v => { let s = Number(v).toFixed(4).replace(/0+$/, ""); return s.endsWith(".") ? s + "0" : s; };
+function glsl(type, value) {
+  if (type === "bool") return value ? "true" : "false";
+  if (type === "int") return String(Math.round(value));
+  if (type === "float") return fmtNum(value);
+  return type + "(" + value.map(fmtNum).join(", ") + ")";
+}
+function parseValue(type, text) {
+  if (type === "bool") return text.trim() === "true";
+  if (type === "float" || type === "int") return Number(text);
+  const m = text.match(/\(([^)]*)\)/); return m ? m[1].split(",").map(Number) : [0, 0, 0];
+}
+function patchSource(src, name, source) {
+  return src.replace(new RegExp("^(const\\s+(?:bool|float|int|vec2|vec3)\\s+" + name + "\\s*=\\s*)([^;]+?)(\\s*;.*)$", "m"), (m, a, b, c) => a + source + c);
+}
+const humanize = n => n.toLowerCase().replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+
+// --- language: Chinese when the system's language is Chinese (or the header
+// switch says so, remembered in this browser), English otherwise ------------
+const ZH = __ZH__;
+const UI = {
+en: {
+ "title": "Cursor effects",
+ "allEffects": "All effects",
+ "enterSw": "Enter & done",
+ "enterTip": "Pauses or resumes the Enter and done moments of every effect (each effect also has its own Enter and Done switches).",
+ "jumpsSw": "Delete-all",
+ "jumpsTip": "Turns the delete-all move on or off for every effect at once (each effect also has its own switch). Half-filled: some effects have it on, some off.",
+ "idleSw": "Idle animations",
+ "idleTip": "Crackle, breath, ping and the like between keystrokes, for every effect. Off keeps the screen calm (Ghostty keeps redrawing while any effect is on, so it saves little battery).",
+ "done": "Done",
+ "doneTip": "Close the panel (the command in your terminal exits)",
+ "langTip": "Switch the panel's language",
+ "live": "Live: changes apply to Ghostty as you make them",
+ "liveUndo": "Live · undo everything from this session: bash {path}/rollback.sh",
+ "saving": "Saving…",
+ "savedSetting": "Saved {name} = {value} · Ghostty reloaded",
+ "savedColor": "Saved cursor color {color} · Ghostty reloaded",
+ "savedBlinkOn": "Saved: the cursor blinks with {effect} · Ghostty reloaded",
+ "savedBlinkOff": "Saved: the cursor stays lit with {effect} · Ghostty reloaded",
+ "noCompile": "That value doesn't compile, so it was not saved",
+ "errSave": "Could not save {name}: {err}",
+ "errColor": "Could not save the color: {err}",
+ "errBlink": "Could not save blinking: {err}",
+ "active": "active",
+ "inUse": "Active in Ghostty",
+ "use": "Use this effect",
+ "reset": "Reset this effect",
+ "switched": "Cursor effect: {effect}",
+ "errSwitch": "Could not switch: {err}",
+ "wasReset": "Reset to the values from when the panel opened.",
+ "errReset": "Could not reset: {err}",
+ "preview": "Preview",
+ "sType": "Type a line",
+ "sEnter": "Enter (send)",
+ "sDone": "Done (answer arrived)",
+ "sDeleteAll": "Delete all",
+ "previewHint": "This is the real shader, playing what Ghostty plays. Just type: it goes to the preview. Enter sends, ⌫ deletes, ⌘⌫ deletes the line, Esc pauses.",
+ "clickToType": "Click to type",
+ "typing": "Type to try it",
+ "zoom": "Zoom",
+ "speed": "Speed",
+ "compileErr": "The shader doesn't compile:\n",
+ "cursorColor": "Cursor color",
+ "contrastOn": "on {bg}",
+ "contrastHint": "7:1 to 9.5:1 against your background is easy on the eyes. Green and blue stay even: the Enter and done signals use their last bits.",
+ "blinks": "Cursor blinks",
+ "blinkHint": "For this effect only; off keeps the cursor lit.",
+ "hint_ENTER_EFFECT": "Plays when you send a prompt or run a command.",
+ "hint_DONE_EFFECT": "Plays again, inward from the edges, when the answer arrives.",
+ "settingsHint": "Each setting is a line at the top of <code>{file}</code>; the panel edits it in place and Ghostty reloads. Sizes are in character heights unless the note says otherwise.",
+ "on": "on",
+ "off": "off",
+ "was": "was {value}",
+ "toggled": "{what}: {state}",
+ "closed": "Panel closed. Run <code>cursor-fx edit</code> again to reopen it.",
+ "sec_Typing": "Typing",
+ "sec_Enter & done": "Enter & done",
+ "sec_Delete-all": "Delete-all",
+ "sec_Cursor": "Cursor",
+ "sec_Prompt mark": "Prompt mark ❯",
+ "sec_Box lines": "Input box lines",
+ "sec_Your text": "Your text",
+ "sec_Look": "Look",
+ "sec_Timing": "Timing",
+ "sec_Other": "Settings",
+ "secd_Enter & done": "When you send a prompt, and again from the window's edges when the answer arrives.",
+ "secd_Box lines": "The two lines around Claude Code's input box.",
+ "secd_Look": "Colors and light shared by everything above.",
+ "secd_Timing": "How long the cursor rests before an effect starts.",
+ "more": "More settings ({n})",
+ "label_ENTER_EFFECT": "Enter",
+ "label_DONE_EFFECT": "Done",
+ "label_LINE_TINT": "Color the lines",
+ "label_LINE_COLOR": "Color strength",
+ "label_LINE_EFFECT": "Animated lines",
+ "label_BACK_THRUST": "Backspace thrust",
+ "label_PHRASE_EFFECT": "Chinese input"
+},
+zh: {
+ "title": "光标特效",
+ "allEffects": "所有特效",
+ "enterSw": "回车与完成",
+ "enterTip": "暂停或恢复所有特效的回车和完成效果（每个特效也有自己的回车、完成开关）。",
+ "jumpsSw": "全删",
+ "jumpsTip": "一次性为所有特效开关全删动作（每个特效也有自己的开关）。半开状态：有的特效开着，有的关着。",
+ "idleSw": "空闲动画",
+ "idleTip": "按键间隙的噼啪、呼吸、声呐等动画，作用于所有特效。关闭可让屏幕更安静（只要开着任何特效，Ghostty 都会持续重绘，所以省电不多）。",
+ "done": "完成",
+ "doneTip": "关闭面板（终端里的命令会退出）",
+ "langTip": "切换面板语言",
+ "live": "实时：修改会立即应用到 Ghostty",
+ "liveUndo": "实时 · 撤销本次所有修改：bash {path}/rollback.sh",
+ "saving": "保存中…",
+ "savedSetting": "已保存 {name} = {value} · Ghostty 已重新加载",
+ "savedColor": "已保存光标颜色 {color} · Ghostty 已重新加载",
+ "savedBlinkOn": "已保存：{effect} 的光标会闪烁 · Ghostty 已重新加载",
+ "savedBlinkOff": "已保存：{effect} 的光标常亮 · Ghostty 已重新加载",
+ "noCompile": "这个值无法编译，未保存",
+ "errSave": "无法保存 {name}：{err}",
+ "errColor": "无法保存颜色：{err}",
+ "errBlink": "无法保存闪烁设置：{err}",
+ "active": "使用中",
+ "inUse": "Ghostty 正在使用",
+ "use": "使用这个特效",
+ "reset": "重置这个特效",
+ "switched": "光标特效：{effect}",
+ "errSwitch": "无法切换：{err}",
+ "wasReset": "已恢复为打开面板时的数值。",
+ "errReset": "无法重置：{err}",
+ "preview": "预览",
+ "sType": "自动打一行",
+ "sEnter": "回车（发送）",
+ "sDone": "完成（回答到达）",
+ "sDeleteAll": "全部删除",
+ "previewHint": "这是真实的着色器，效果和 Ghostty 里一样。直接打字就会输入到预览里：回车发送，⌫ 删除，⌘⌫ 删除整行，Esc 暂停。",
+ "clickToType": "点击后打字",
+ "typing": "直接打字试试",
+ "zoom": "缩放",
+ "speed": "速度",
+ "compileErr": "着色器无法编译：\n",
+ "cursorColor": "光标颜色",
+ "contrastOn": "（背景 {bg}）",
+ "contrastHint": "与背景的对比度在 7:1 到 9.5:1 之间看起来最舒适。绿色和蓝色数值保持为偶数（回车和完成信号要用到它们的最低位）。",
+ "blinks": "光标闪烁",
+ "blinkHint": "只对这个特效生效；关闭后光标常亮。",
+ "hint_ENTER_EFFECT": "发送提示或运行命令时播放。",
+ "hint_DONE_EFFECT": "回答到达时，从边缘向内再播放一次。",
+ "settingsHint": "每个设置对应 <code>{file}</code> 顶部的一行；面板会直接修改它，Ghostty 随即重新加载。除非另有说明，尺寸单位都是字符高度。",
+ "on": "开",
+ "off": "关",
+ "was": "原为 {value}",
+ "toggled": "{what}：{state}",
+ "closed": "面板已关闭。再次运行 <code>cursor-fx edit</code> 可重新打开。",
+ "sec_Typing": "打字",
+ "sec_Enter & done": "回车与完成",
+ "sec_Delete-all": "全删",
+ "sec_Cursor": "光标",
+ "sec_Prompt mark": "提示符 ❯",
+ "sec_Box lines": "输入框线条",
+ "sec_Your text": "你的文字",
+ "sec_Look": "外观",
+ "sec_Timing": "时机",
+ "sec_Other": "设置",
+ "secd_Enter & done": "发送提示时播放；回答到达时从窗口边缘向内再播放一次。",
+ "secd_Box lines": "Claude Code 输入框上下的两条线。",
+ "secd_Look": "以上各部分共用的颜色和亮度。",
+ "secd_Timing": "光标停留多久后特效才开始。",
+ "more": "更多设置（{n} 项）",
+ "label_ENTER_EFFECT": "回车",
+ "label_DONE_EFFECT": "完成",
+ "label_LINE_TINT": "线条着色",
+ "label_LINE_COLOR": "着色强度",
+ "label_LINE_EFFECT": "动态线条",
+ "label_BACK_THRUST": "退格推进",
+ "label_PHRASE_EFFECT": "中文输入"
+}
+};
+let LANG = (() => {
+  try { const s = localStorage.getItem("cursor-fx-lang"); if (s === "en" || s === "zh") return s; } catch (e) {}
+  return /^zh/i.test(STATE.sysLang || navigator.language || "") ? "zh" : "en";
+})();
+function t(key, vars) { let s = UI[LANG][key] ?? UI.en[key] ?? key; for (const k in vars || {}) s = s.split("{" + k + "}").join(vars[k]); return s; }
+const nameOf = e => LANG === "zh" && ZH.effects[e.name] ? ZH.effects[e.name][0] : e.name;
+const descOf = e => LANG === "zh" && ZH.effects[e.name] ? ZH.effects[e.name][1] : e.description;
+// English labels where the constant's own name reads badly.
+const EN_NAMES = { DECODE_STYLE: "Decrypt style", WORD_DECODE: "Word decrypt", TYPE_PULSE: "Data pulses", TYPE_BEAM: "Write beam",
+  TYPE_KICK: "Cursor kick", DECODE_TIME: "Decrypt time", TYPE_TIME: "Typing light" };
+const labelOf = s => LANG === "zh" && ZH.names[s.name] ? ZH.names[s.name] : EN_NAMES[s.name] || humanize(s.name);
+const groupOf = g => LANG === "zh" && ZH.groups && ZH.groups[g] ? ZH.groups[g] : g;
+// An int whose note ends in "...: 0 one, 1 two, 2 three" is a choice: {help, items: [[0, "One"], ...]}.
+function choicesOf(s) {
+  const m = helpOf(s).match(/^(.*?)[:：]\s*((?:\d+\s*[^,，]+[,，]\s*)+\d+\s*[^,，]+)$/);
+  if (!m) return null;
+  const items = m[2].split(/[,，]\s*/).map(x => { const k = x.match(/^(\d+)\s*(.+)$/); return k ? [Number(k[1]), k[2].trim().replace(/^./, c => c.toUpperCase())] : null; });
+  return items.every(Boolean) ? { help: m[1], items } : null;
+}
+// "typing: how each letter decrypts" under the Typing heading reads "how each letter decrypts".
+function noteFor(text, group) {
+  if (!text || !group) return text;
+  for (const g of [group, groupOf(group)]) {
+    const low = text.toLowerCase(), pre = g.toLowerCase();
+    for (const sep of [": ", "："]) if (low.startsWith(pre + sep)) return text.slice(pre.length + sep.length);
+  }
+  return text;
+}
+const helpOf = s => LANG === "zh" && ZH.comments[s.comment] ? ZH.comments[s.comment] : s.comment;
+function applyLang() {
+  document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en"; document.title = t("title");
+  $("#hTitle").textContent = t("title"); $("#lAll").textContent = t("allEffects"); $("#lEnter").textContent = t("enterSw"); $("#enterLabel").title = t("enterTip"); $("#lJumps").textContent = t("jumpsSw"); $("#jumpsLabel").title = t("jumpsTip");
+  $("#lIdle").textContent = t("idleSw"); $("#idleLabel").title = t("idleTip");
+  $("#doneBtn").textContent = t("done"); $("#doneBtn").title = t("doneTip");
+  $("#langBtn").textContent = LANG === "zh" ? "English" : "中文"; $("#langBtn").title = t("langTip");
+}
+
+// --- preview: the shader itself, run in WebGL over a drawn terminal --------
+const W = 1200, H = 420, CH = 44, PADX = 16, PADY = 12, ROW = 6;
+const term = document.createElement("canvas"); term.width = W; term.height = H;
+const tc = term.getContext("2d"); tc.font = "30px Menlo, Consolas, monospace"; const CW = tc.measureText("M").width;
+const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+const gl = cv.getContext("webgl2", { preserveDrawingBuffer: true });
+const PRELUDE = `#version 300 es
+precision highp float; precision highp int;
+uniform vec3 iResolution; uniform float iTime;
+uniform vec4 iCurrentCursor; uniform vec4 iPreviousCursor;
+uniform vec4 iCurrentCursorColor; uniform vec4 iPreviousCursorColor;
+uniform int iCurrentCursorStyle; uniform int iCursorVisible;
+uniform float iTimeCursorChange; uniform int iFocus;
+uniform vec3 iPalette[16];
+uniform vec3 iBackgroundColor; uniform vec3 iForegroundColor; uniform vec3 iCursorText;
+#define CURSORSTYLE_BLOCK 0
+uniform sampler2D iChannel0;
+out vec4 _fragColor;
+vec4 texLin(sampler2D s, vec2 uv) { vec4 c = texture(s, uv); return vec4(pow(c.rgb, vec3(2.2)), c.a); }
+#define texture texLin
+`;
+const POST = `
+void main() { vec4 c; mainImage(c, ${STATE.yDown ? "vec2(gl_FragCoord.x, iResolution.y - gl_FragCoord.y)" : "gl_FragCoord.xy"}); _fragColor = vec4(pow(c.rgb, vec3(1.0 / 2.2)), 1.0); }
+`;
+let prog = null, uni = {}, previewError = null;
+function compileShader(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+function buildProgram(source) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, "#version 300 es\nin vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }"));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, PRELUDE + source + POST));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !STATE.yDown);
+for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+gl.viewport(0, 0, W, H);
+function usePreview(source) {
+  try { const p = buildProgram(source); if (prog) gl.deleteProgram(prog); prog = p; previewError = null; }
+  catch (e) { previewError = String(e.message || e); return; }
+  gl.useProgram(prog);
+  const loc = gl.getAttribLocation(prog, "pos"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  uni = {}; for (const n of ["iResolution", "iTime", "iCurrentCursor", "iPreviousCursor", "iCurrentCursorColor", "iPreviousCursorColor", "iCurrentCursorStyle", "iCursorVisible", "iTimeCursorChange", "iFocus", "iPalette", "iBackgroundColor", "iForegroundColor", "iCursorText", "iChannel0"]) uni[n] = gl.getUniformLocation(prog, n);
+  const c = STATE.colors;
+  gl.uniform3f(uni.iResolution, W, H, 1);
+  gl.uniform3f(uni.iBackgroundColor, ...hexToRgb(c.background));
+  gl.uniform3f(uni.iForegroundColor, ...hexToRgb(c.foreground));
+  gl.uniform3f(uni.iCursorText, ...hexToRgb(c.cursorText || c.background));
+  gl.uniform1i(uni.iCurrentCursorStyle, 0); gl.uniform1i(uni.iCursorVisible, 1); gl.uniform1i(uni.iFocus, 1); gl.uniform1i(uni.iChannel0, 0);
+  const pal = new Float32Array(48);
+  const fallback = ["#000000", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf", "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
+  for (let i = 0; i < 16; i++) pal.set(hexToRgb(c.palette[i] || fallback[i]), i * 3);
+  gl.uniform3fv(uni.iPalette, pal);
+  drawTerm();
+}
+// The drawn terminal: a Claude Code-like screen with a sent prompt on a bar, the
+// input box between two lines, and a status line.
+const sim = { preedit: "", input: "", sent: "make the cursor effects awesome", cur: 2, prev: 2, prevRow: 0, change: 0, signalUntil: 0, signalPrev: false, kind: "enter", color: "#f85552" };
+function lighten(hex, k) { return rgbToHex(hexToRgb(hex).map(v => v + (1 - v) * k)); }
+// Chinese, Japanese and Korean characters take two cells, as in the terminal.
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]|[\u{20000}-\u{3FFFD}]/u;
+const cellsOf = text => Array.from(text).reduce((n, ch) => n + (WIDE.test(ch) ? 2 : 1), 0);
+// Text drawn cell by cell from a column; returns the column after it.
+function drawCells(text, col, row, color) {
+  tc.fillStyle = color;
+  for (const ch of Array.from(text)) {
+    const x = PADX + col * CW, y = PADY + row * CH + 6;
+    if (WIDE.test(ch)) {
+      tc.save(); tc.font = `${Math.round(CH * 0.66)}px "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`;
+      tc.fillText(ch, x + (2 * CW - tc.measureText(ch).width) / 2, y + 1); tc.restore(); col += 2;
+    } else { tc.fillText(ch, x, y); col += 1; }
+  }
+  return col;
+}
+function drawTerm() {
+  const c = STATE.colors, bg = c.background, fg = c.foreground;
+  tc.fillStyle = bg; tc.fillRect(0, 0, W, H); tc.textBaseline = "top";
+  tc.fillStyle = lighten(bg, 0.06); tc.fillRect(0, PADY + 2 * CH, W, CH);
+  tc.fillStyle = lighten(bg, 0.3); for (const r of [5, 7]) tc.fillRect(PADX, PADY + r * CH + CH / 2 - 1, W - 2 * PADX, 2);
+  const lines = ["● Done: the effects are installed.", "", "❯ " + sim.sent, "", "✻ Thinking…", "", "", "", "  Opus 5.5 ¦ Ghostty ¦ ctx 32%"];
+  lines.forEach((l, r) => { if (r === 2 || r === ROW) return; tc.fillStyle = r === 8 ? lighten(bg, 0.35) : fg; tc.fillText(l, PADX, PADY + r * CH + 6); });
+  drawCells("❯ " + sim.sent, 0, 2, fg);
+  drawCells("❯ " + sim.input, 0, ROW, fg);
+  if (sim.preedit) {
+    // Text the input method is still composing: underlined at the cursor, the cursor hidden.
+    const end = drawCells(sim.preedit, sim.cur, ROW, fg);
+    tc.fillStyle = fg; tc.fillRect(Math.round(PADX + sim.cur * CW), PADY + ROW * CH + CH - 5, Math.round((end - sim.cur) * CW), 2);
+  } else {
+    tc.fillStyle = sim.color; tc.fillRect(Math.round(PADX + sim.cur * CW), PADY + ROW * CH, Math.round(CW), CH);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, term);
+}
+// Ghostty on macOS (Metal) hands shaders y-down pixels, the cursor's .y being
+// its bottom edge; on Linux (OpenGL) y-up, .y the top edge. The preview does the
+// same as the Ghostty on this machine (see POST and the texture's FLIP_Y).
+const rect = (row, col) => [Math.round(PADX + col * CW), STATE.yDown ? PADY + (row + 1) * CH : H - (PADY + row * CH), Math.round(CW), CH];
+// The preview's clock: seconds, running at SPEED (slow motion below 1); its timers follow it.
+let SPEED = 1, ZOOM = 1, clockBase = 0, clockReal = performance.now();
+const now = () => clockBase + (performance.now() - clockReal) / 1000 * SPEED;
+function setSpeed(v) { clockBase = now(); clockReal = performance.now(); SPEED = v; lastAction = now(); }
+const later = (fn, ms) => setTimeout(fn, ms / SPEED);
+// The preview runs at full rate for a few seconds after anything happens, then
+// ticks slowly (idle animations still move) so a panel left open costs little.
+let lastAction = 0, frameNo = 0;
+function oddBlue(hex) { const c = hexToRgb(hex); return [c[0], c[1], (Math.round(c[2] * 255) | 1) / 255]; }
+function oddGreen(hex) { const c = hexToRgb(hex); return [c[0], (Math.round(c[1] * 255) | 1) / 255, c[2]]; }
+function frame() {
+  requestAnimationFrame(frame);
+  if (!prog || document.hidden) return;
+  frameNo++;
+  if (now() - lastAction > 4 && frameNo % 10 !== 0) return;
+  const t = now(), on = t < sim.signalUntil, base = hexToRgb(sim.color), odd = sim.kind === "done" ? oddGreen(sim.color) : oddBlue(sim.color);
+  gl.uniform1f(uni.iTime, t); gl.uniform1f(uni.iTimeCursorChange, sim.change);
+  gl.uniform4f(uni.iCurrentCursor, ...rect(ROW, sim.cur)); gl.uniform4f(uni.iPreviousCursor, ...rect(ROW + sim.prevRow, sim.prev));
+  gl.uniform4f(uni.iCurrentCursorColor, ...(on ? odd : base), 1); gl.uniform4f(uni.iPreviousCursorColor, ...(sim.signalPrev ? odd : base), 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const err = $("#previewErr"); if (err) { err.hidden = !previewError; if (previewError) err.textContent = t("compileErr") + previewError; }
+}
+requestAnimationFrame(frame);
+let typing = null;
+function moveCursor(col, row = 0) { sim.prev = sim.cur; sim.prevRow = row; sim.cur = col; sim.change = now(); lastAction = sim.change; drawTerm(); applyZoom(); }
+function endSignal() { sim.signalPrev = true; sim.change = now(); sim.signalUntil = 0; later(() => { sim.signalPrev = false; }, 50); }
+const MAX_INPUT = Math.floor((W - 2 * PADX) / CW) - 4;
+// Typed or picked text goes in at once: one cursor move for a whole phrase, like the terminal.
+function insertText(text) {
+  clearTimeout(typing);
+  for (const ch of Array.from(text.replace(/[\r\n]/g, ""))) { if (cellsOf(sim.input + ch) > MAX_INPUT) break; sim.input += ch; }
+  moveCursor(2 + cellsOf(sim.input));
+}
+// The preview's Enter and done always start from the plain color (a real second signal while
+// one is on also flips the red value's lowest bit; see `cursor-fx signal`).
+const scenarios = {
+  type() { clearTimeout(typing); const text = "make the cursor glow"; let i = 0; sim.input = ""; moveCursor(2); const step = () => { if (i >= text.length) return; sim.input += text[i++]; moveCursor(2 + cellsOf(sim.input)); typing = later(step, 130); }; typing = later(step, 130); },
+  enter() { clearTimeout(typing); if (!sim.input) sim.input = "make it glow"; sim.sent = sim.input; sim.input = ""; moveCursor(2); later(() => { sim.kind = "enter"; sim.signalPrev = false; sim.signalUntil = now() + 1.9; sim.change = now(); sim.prev = sim.cur; sim.prevRow = 0; later(endSignal, 1900); }, 60); },
+  done() { clearTimeout(typing); sim.kind = "done"; sim.signalPrev = false; sim.signalUntil = now() + 1.9; sim.change = now(); lastAction = sim.change; sim.prev = sim.cur; sim.prevRow = 0; later(endSignal, 1900); },
+  deleteAll() { clearTimeout(typing); if (!sim.input) { sim.input = "delete all of this text"; moveCursor(2 + cellsOf(sim.input)); later(() => { sim.input = ""; moveCursor(2); }, 400); } else { sim.input = ""; moveCursor(2); } }
+};
+// Typing straight into the preview (it has focus): letters, Backspace, Cmd/Ctrl/Alt+Backspace, Enter.
+// Keys an input method is using (pinyin and the like) are left to it: its text arrives at compositionend.
+function previewKey(ev) {
+  if (ev.isComposing || ev.keyCode === 229) return;
+  if (ev.key === "Escape") { ev.currentTarget.blur(); return; }
+  if (ev.key === "Enter") { ev.preventDefault(); scenarios.enter(); return; }
+  if (ev.key === "Backspace") {
+    ev.preventDefault(); clearTimeout(typing);
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) { if (sim.input) { sim.input = ""; moveCursor(2); } }
+    else if (sim.input) { sim.input = Array.from(sim.input).slice(0, -1).join(""); moveCursor(2 + cellsOf(sim.input)); }
+    return;
+  }
+  if (ev.key.length === 1 && !ev.metaKey && !ev.ctrlKey) {
+    ev.preventDefault(); clearTimeout(typing);
+    insertText(ev.key);
+  }
+}
+// Zoom: the preview scaled up around the cursor (the canvas has more pixels than it is shown with).
+function applyZoom() {
+  const box = $("#previewBox"), z = box && box.querySelector(".pvzoom"); if (!z) return;
+  const bw = box.clientWidth, k = bw / W, bh = H * k;
+  const px = (PADX + (sim.cur + 0.5) * CW) * k, py = (PADY + (ROW + 0.5) * CH) * k;
+  const tx = Math.min(0, Math.max(bw - bw * ZOOM, bw / 2 - px * ZOOM)), ty = Math.min(0, Math.max(bh - bh * ZOOM, bh / 2 - py * ZOOM));
+  z.style.transform = ZOOM === 1 ? "none" : `translate(${tx}px, ${ty}px) scale(${ZOOM})`;
+  // The (invisible) text field sits on the cursor, so the input method's candidates show next to it.
+  const ime = box.querySelector("#ime");
+  if (ime) { const zx = ZOOM === 1 ? 0 : tx, zy = ZOOM === 1 ? 0 : ty; ime.style.left = `${zx + (PADX + sim.cur * CW) * k * ZOOM}px`; ime.style.top = `${zy + (PADY + ROW * CH) * k * ZOOM}px`; ime.style.height = `${CH * k * ZOOM}px`; }
+}
+window.addEventListener("resize", applyZoom);
+
+// --- the page ---------------------------------------------------------------
+let selected = STATE.active !== "off" && STATE.effects.some(e => e.name === STATE.active) ? STATE.active : (STATE.effects[0] || {}).name;
+const effectOf = name => STATE.effects.find(e => e.name === name);
+const cap = s => s && LANG === "en" ? s[0].toUpperCase() + s.slice(1) : s;
+// What an effect is, in a few words (an effect added later: its description up to the first pause).
+const TAGLINES = {
+  en: { cyber: "Data rain, decrypting text", lightning: "Arcs of current", glitch: "A corrupted signal", neon: "A glowing pink tube",
+        phosphor: "Green CRT glow", embers: "A burning coal", shockwave: "Ripples that bend text", katana: "A polished steel blade",
+        teleport: "A transporter beam", fireworks: "Sparkler and fireworks", aurora: "Northern lights", mecha: "Robot armor", hologram: "A cyan projection" },
+  zh: { cyber: "数据雨，逐字解密", lightning: "电弧与闪电", glitch: "受损的信号", neon: "粉色霓虹灯管", phosphor: "绿色 CRT 荧光", embers: "燃烧的炭火",
+        shockwave: "让文字弯曲的波纹", katana: "抛光的钢刃", teleport: "传送光束", fireworks: "手持烟花与烟火", aurora: "北极光", mecha: "机甲装甲", hologram: "青色全息投影" } };
+const taglineOf = e => TAGLINES[LANG][e.name] || cap((descOf(e) || "").split(/[;；。:：(（]/)[0].trim());
+function renderList() {
+  const el = $("#effects"); el.innerHTML = "";
+  for (const e of STATE.effects) {
+    const b = document.createElement("button"); b.type = "button"; b.className = "effect" + (e.name === selected ? " selected" : "");
+    if (e.name === selected) b.setAttribute("aria-current", "true");
+    b.innerHTML = `<span class="dot"></span><span class="name"></span>${e.name === STATE.active ? '<span class="badge"></span>' : ""}<span class="tag"></span>`;
+    b.querySelector(".dot").style.background = e.color; b.querySelector(".name").textContent = cap(nameOf(e)); b.querySelector(".tag").textContent = taglineOf(e);
+    if (b.querySelector(".badge")) b.querySelector(".badge").textContent = t("active");
+    b.onclick = () => { if (selected === e.name) return; selected = e.name; renderList(); renderDetail(); for (const id of ["#knobs", "#detail", "#stage"]) { const el = $(id); if (el) el.scrollTop = 0; } };
+    el.appendChild(b);
+  }
+  $("#enterSwitch").checked = STATE.enter; showSharedFlags();
+}
+// A header switch shared by every effect: on, off, or half-filled when the effects differ.
+function flagState(name) {
+  const vals = new Set(STATE.effects.map(e => (e.settings.find(s => s.name === name) || {}).value).filter(Boolean).map(v => v.trim()));
+  return vals.size === 1 ? (vals.has("true") ? "on" : "off") : vals.size ? "mixed" : "n/a";
+}
+function showSharedFlags() {
+  for (const [id, name] of [["#jumpsSwitch", "JUMP_EFFECTS"], ["#idleSwitch", "IDLE_EFFECTS"]]) {
+    const st = flagState(name), cb = $(id); cb.checked = st === "on"; cb.indeterminate = st === "mixed";
+  }
+}
+const timers = {};
+function debounce(key, ms, fn) { clearTimeout(timers[key]); timers[key] = setTimeout(fn, ms); }
+
+// Every effect's settings come in the same sections, in this order (the `// -- Name` lines in
+// its shader). A section's on/off switch sits in its title; IDLE_EFFECTS is the header's.
+const SECTION_ORDER = ["Typing", "Enter & done", "Delete-all", "Cursor", "Prompt mark", "Box lines", "Your text", "Look", "Timing"];
+const MASTER = { "Typing": "TYPE_EFFECT", "Delete-all": "JUMP_EFFECTS", "Cursor": "CURSOR_EFFECT", "Prompt mark": "PROMPT_EFFECT", "Your text": "TEXT_COLOR" };
+const HIDDEN = new Set(["IDLE_EFFECTS"]);
+const secTitle = g => UI[LANG]["sec_" + g] ?? UI.en["sec_" + g] ?? groupOf(g);
+// A switch's note, read as a sentence: without "the cursor's own look:" and the like (the
+// section title says it) and without command-line hints in parentheses.
+const PREFIXES = [/^the cursor's own look:\s*/i, /^the prompt mark \(❯\) at the start of the cursor's line:\s*/i, /^the input box lines, always:\s*/i,
+  /^光标自身的外观[：:]\s*/, /^(光标所在行开头的|行首的|光标所在行的)提示符（❯）[：:]\s*/, /^输入框(的)?(上下两条)?线条[，,]?\s*(始终|常驻)[^：:]*[：:]\s*/];
+const plain = s => { s = s || ""; for (const p of PREFIXES) s = s.replace(p, ""); return s.replace(/\s*[（(][^()（）]*`[^()（）]*[）)]/g, "").replace(/\s*[（(]sRGB[）)]/g, "").trim(); };
+
+// Redraws the selected effect, keeping the scroll position and the open "More settings"
+// sections where they were (nothing on the page jumps).
+function renderDetail() {
+  const panes = ["#knobs", "#detail", "#stage"].map(id => [$(id), ($(id) || {}).scrollTop || 0]), y = window.scrollY;
+  const open = new Set([...document.querySelectorAll("#knobs details[open]")].map(d => d.closest(".sec").dataset.group));
+  renderDetailNow();
+  document.querySelectorAll("#knobs .sec").forEach(s => { if (open.has(s.dataset.group)) { const d = s.querySelector("details"); if (d) d.open = true; } });
+  for (const [el, top] of panes) if (el) el.scrollTop = top;
+  window.scrollTo(0, y);
+  typeReady();
+}
+function renderDetailNow() {
+  const e = effectOf(selected); if (!e) return;
+  document.documentElement.style.setProperty("--accent", e.color);
+  sim.color = e.color; usePreview(e.source); lastAction = now();
+  const d = $("#stage"), k = $("#knobs"); d.innerHTML = ""; k.innerHTML = "";
+  const card = document.createElement("div"); card.className = "card";
+  const segs = (id, items, cur) => `<div class="seg small" id="${id}" role="radiogroup">${items.map(([v, l]) => `<button type="button" role="radio" data-v="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  card.innerHTML = `<div class="title"><h2></h2><div class="actions"><button class="primary" id="useBtn"></button><button id="resetBtn"></button></div></div><p class="desc"></p>
+    <div class="preview" id="previewBox" tabindex="0" aria-label="${t("preview")}"><div class="pvzoom"></div><span class="kbd" id="kbdHint">${t("clickToType")}</span><pre class="err" id="previewErr" hidden></pre><textarea id="ime" class="ime" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="${t("preview")}"></textarea></div>
+    <div class="pvbar"><div class="row"><button data-s="type">${t("sType")}</button><button data-s="enter">${t("sEnter")}</button><button data-s="done">${t("sDone")}</button><button data-s="deleteAll">${t("sDeleteAll")}</button></div>
+      <div class="row pvopts"><span class="lbl">${t("zoom")}</span>${segs("zoomSeg", [[1, "1×"], [2, "2×"], [4, "4×"]], ZOOM)}<span class="lbl">${t("speed")}</span>${segs("speedSeg", [[1, "1×"], [0.5, "½×"], [0.25, "¼×"]], SPEED)}</div></div>
+    <p class="hint">${t("previewHint")}</p>`;
+  card.querySelector("h2").textContent = cap(nameOf(e)); card.querySelector(".desc").textContent = cap(descOf(e)); card.querySelector("#resetBtn").textContent = t("reset");
+  const useBtn = card.querySelector("#useBtn"); useBtn.textContent = e.name === STATE.active ? t("inUse") : t("use"); useBtn.disabled = e.name === STATE.active;
+  useBtn.onclick = async () => { try { await post("/activate", { effect: e.name }); STATE.active = e.name; toast(t("switched", { effect: cap(nameOf(e)) })); renderList(); renderDetail(); } catch (err) { toast(t("errSwitch", { err: err.message })); } };
+  card.querySelector("#resetBtn").onclick = async () => { try { await post("/reset", { effect: e.name }); await refresh(); toast(t("wasReset")); } catch (err) { toast(t("errReset", { err: err.message })); } };
+  const box = card.querySelector("#previewBox"), hintEl = card.querySelector("#kbdHint");
+  box.querySelector(".pvzoom").appendChild(cv);
+  const ime = card.querySelector("#ime"), typeHere = () => ime.focus({ preventScroll: true });
+  box.addEventListener("mousedown", ev => { ev.preventDefault(); typeHere(); });
+  box.addEventListener("focus", typeHere);
+  ime.addEventListener("keydown", previewKey);
+  ime.addEventListener("compositionupdate", ev => { sim.preedit = ev.data || ""; lastAction = now(); drawTerm(); });
+  ime.addEventListener("compositionend", ev => { sim.preedit = ""; ime.value = ""; if (ev.data) insertText(ev.data); else drawTerm(); });
+  ime.addEventListener("input", ev => { if (ev.isComposing) return; const v = ime.value; ime.value = ""; if (v) insertText(v); });
+  ime.addEventListener("focus", () => { hintEl.textContent = t("typing"); box.classList.add("focused"); });
+  ime.addEventListener("blur", () => { hintEl.textContent = t("clickToType"); box.classList.remove("focused"); if (sim.preedit) { sim.preedit = ""; drawTerm(); } });
+  card.querySelectorAll("[data-s]").forEach(b => b.onclick = () => { scenarios[b.dataset.s](); typeHere(); });
+  const pickSeg = (id, fn) => card.querySelectorAll(`#${id} button`).forEach(b => b.onclick = () => {
+    card.querySelectorAll(`#${id} button`).forEach(x => x.classList.toggle("on", x === b)); fn(Number(b.dataset.v)); typeHere(); });
+  pickSeg("zoomSeg", v => { ZOOM = v; applyZoom(); });
+  pickSeg("speedSeg", v => setSpeed(v));
+  d.appendChild(card);
+  requestAnimationFrame(applyZoom);
+  // The sections.
+  const groups = new Map();
+  for (const s of e.settings) {
+    if (HIDDEN.has(s.name)) continue;
+    const g = s.group || "Other";
+    if (!groups.has(g)) groups.set(g, { main: [], fine: [] });
+    groups.get(g)[s.section === "fine" ? "fine" : "main"].push(s);
+  }
+  if (!groups.has("Cursor")) groups.set("Cursor", { main: [], fine: [] });
+  const names = [...SECTION_ORDER.filter(g => groups.has(g)), ...[...groups.keys()].filter(g => !SECTION_ORDER.includes(g))];
+  for (const g of names) k.appendChild(sectionEl(e, g, groups.get(g)));
+  k.insertAdjacentHTML("beforeend", `<p class="hint">${t("settingsHint", { file: e.shader })}</p>`);
+}
+function sectionEl(e, g, { main, fine }) {
+  const sec = document.createElement("section"); sec.className = "sec"; sec.dataset.group = g;
+  const head = document.createElement("div"); head.className = "sechead";
+  const h = document.createElement("h3"); h.textContent = secTitle(g); head.appendChild(h); sec.appendChild(head);
+  const master = MASTER[g] && main.find(s => s.name === MASTER[g]);
+  if (master) {
+    const row = settingRow(e, master, { markEl: head, onValue: v => sec.classList.toggle("off", !v) });
+    const ctl = row.querySelector(".control"); ctl.querySelector("input").setAttribute("aria-label", secTitle(g)); head.appendChild(ctl);
+  }
+  const text = master ? plain(helpOf(master)) : (UI[LANG]["secd_" + g] ?? UI.en["secd_" + g]);
+  if (text) { const p = document.createElement("p"); p.className = "secdesc"; p.textContent = cap(text); sec.appendChild(p); }
+  const body = document.createElement("div"); body.className = "group";
+  if (g === "Cursor") { body.appendChild(colorRow(e)); body.appendChild(blinkRow(e)); }
+  for (const s of main) if (s !== master) body.appendChild(settingRow(e, s));
+  if (body.children.length) sec.appendChild(body);
+  if (fine.length) {
+    const det = document.createElement("details"); det.className = "more";
+    det.innerHTML = `<summary>${t("more", { n: fine.length })}</summary>`;
+    const fg = document.createElement("div"); fg.className = "group";
+    for (const s of fine) fg.appendChild(settingRow(e, s));
+    det.appendChild(fg); sec.appendChild(det);
+  }
+  return sec;
+}
+// The cursor color (from the effect's preset) and whether it blinks, as rows of the Cursor section.
+function colorRow(e) {
+  const row = document.createElement("div"); row.className = "setting";
+  row.innerHTML = `<label for="colorHex"></label><div class="control"><span class="contrast" id="contrast"></span><input type="color" id="colorPick" aria-label="${t("cursorColor")}"><input type="text" id="colorHex" maxlength="7" spellcheck="false"></div><div class="foot"><div class="help"></div></div>`;
+  row.querySelector("label").textContent = t("cursorColor"); row.querySelector(".help").textContent = t("contrastHint");
+  const pick = row.querySelector("#colorPick"), hex = row.querySelector("#colorHex"), ctr = row.querySelector("#contrast");
+  const showContrast = c => { const r = contrast(c, STATE.colors.background); ctr.innerHTML = `<b>${r.toFixed(1)}:1</b> ${t("contrastOn", { bg: STATE.colors.background })}`; };
+  pick.value = e.color; hex.value = e.color; showContrast(e.color);
+  const applyColor = c => { if (!/^#[0-9a-fA-F]{6}$/.test(c)) return; pick.value = c; hex.value = c; showContrast(c); sim.color = c; drawTerm(); document.documentElement.style.setProperty("--accent", c);
+    setSaving();
+    debounce("color", 300, async () => { try { const r = await post("/color", { effect: e.name, color: c }); e.color = r.color; sim.color = r.color; hex.value = r.color; pick.value = r.color; STATE.savepoint = r.savepoint; renderList(); setStatus("saved", t("savedColor", { color: r.color })); } catch (err) { setStatus("error", t("errColor", { err: err.message })); } }); };
+  pick.oninput = () => applyColor(pick.value); hex.onchange = () => applyColor(hex.value.startsWith("#") ? hex.value : "#" + hex.value);
+  return row;
+}
+function blinkRow(e) {
+  const row = document.createElement("div"); row.className = "setting";
+  row.innerHTML = `<label for="blinkSwitch"></label><div class="control"><label class="switch"><input type="checkbox" id="blinkSwitch"> <span class="state"></span></label></div><div class="foot"><div class="help"></div></div>`;
+  row.querySelector("label").textContent = t("blinks"); row.querySelector(".help").textContent = t("blinkHint");
+  const blink = row.querySelector("#blinkSwitch"), st = row.querySelector(".state");
+  const show = () => { blink.checked = e.blink; st.textContent = t(e.blink ? "on" : "off"); }; show();
+  blink.onchange = async () => { setSaving(); try { const r = await post("/blink", { effect: e.name, on: blink.checked }); e.blink = r.blink; STATE.savepoint = r.savepoint; show(); setStatus("saved", t(r.blink ? "savedBlinkOn" : "savedBlinkOff", { effect: cap(nameOf(e)) })); } catch (err) { show(); setStatus("error", t("errBlink", { err: err.message })); } };
+  return row;
+}
+// A row's label and note: the panel's own words for the shared switches, the shader's otherwise.
+const labelFor = s => UI[LANG]["label_" + s.name] ?? (LANG === "en" ? UI.en["label_" + s.name] : undefined) ?? labelOf(s);
+const noteOf = (s, help) => UI[LANG]["hint_" + s.name] ?? cap(plain(noteFor(help, s.group)));
+// One setting: a control, the value, a mark when it differs from the value the
+// panel opened with (and a button back to it). Edits recompile the preview a
+// moment after the last change and save a moment after that; nothing that
+// fails to compile is saved. opts.markEl gets the changed mark instead of the row
+// (a section title), opts.onValue hears every value (a section dims when off).
+function settingRow(e, s, opts = {}) {
+  const row = document.createElement("div"); row.className = "setting";
+  const label = document.createElement("label"); label.textContent = labelFor(s); label.title = s.name; row.appendChild(label);
+  const ctl = document.createElement("div"); ctl.className = "control"; row.appendChild(ctl);
+  const original = ((STATE.original[e.name] || {}).settings || {})[s.name];
+  let value = parseValue(s.type, s.value);
+  const choices = s.type === "int" ? choicesOf(s) : null;
+  const shown = v => s.type === "bool" ? t(String(v).trim() === "true" ? "on" : "off")
+    : choices ? (choices.items.find(([k]) => k === Number(v)) || [0, v])[1] : v;
+  const was = document.createElement("span"); was.className = "was";
+  const markChanged = () => { const changed = original !== undefined && s.value !== original; (opts.markEl || row).classList.toggle("changed", changed); row.classList.toggle("changed", changed); if (!was.firstChild && original !== undefined) { was.innerHTML = `${t("was", { value: shown(original) })}<button type="button">↺</button>`; was.querySelector("button").onclick = () => { value = parseValue(s.type, original); setControls(); commit(); }; } };
+  let setControls = () => {};
+  const commit = () => {
+    const source = glsl(s.type, value); if (source === s.value) return;
+    const prevSource = e.source, prevValue = s.value;
+    s.value = source; e.source = patchSource(e.source, s.name, source); markChanged();
+    debounce("compile", 120, () => { usePreview(e.source); lastAction = now(); });
+    setSaving();
+    debounce("set:" + e.name + ":" + s.name, 320, async () => {
+      if (previewError) { e.source = prevSource; s.value = prevValue; value = parseValue(s.type, prevValue); setControls(); markChanged(); usePreview(e.source); setStatus("error", t("noCompile")); return; }
+      try { const r = await post("/set", { effect: e.name, name: s.name, type: s.type, value }); STATE.savepoint = r.savepoint; if ((STATE.sharedFlags || []).includes(s.name)) showSharedFlags(); setStatus("saved", t("savedSetting", { name: opts.markEl ? secTitle(s.group) : labelFor(s), value: shown(r.source) })); }
+      catch (err) { setStatus("error", t("errSave", { name: labelFor(s), err: err.message })); }
+    });
+  };
+  if (choices) {
+    row.classList.add("choice");
+    const seg = document.createElement("div"); seg.className = "seg"; seg.setAttribute("role", "radiogroup"); seg.setAttribute("aria-label", labelFor(s));
+    const btns = choices.items.map(([v, name]) => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = name; b.setAttribute("role", "radio");
+      b.onclick = () => { if (value === v) return; value = v; setControls(); commit(); };
+      seg.appendChild(b); return [v, b];
+    });
+    setControls = () => btns.forEach(([v, b]) => { b.classList.toggle("on", v === value); b.setAttribute("aria-checked", v === value); });
+    ctl.appendChild(seg);
+  } else if (s.type === "bool") {
+    const sw = document.createElement("label"); sw.className = "switch"; sw.innerHTML = `<input type="checkbox"> <span class="state"></span>`;
+    const cb = sw.querySelector("input"), txt = sw.querySelector(".state"); cb.setAttribute("aria-label", labelFor(s));
+    setControls = () => { cb.checked = value; txt.textContent = t(value ? "on" : "off"); if (opts.onValue) opts.onValue(value); };
+    cb.onchange = () => { value = cb.checked; setControls(); commit(); }; ctl.appendChild(sw);
+  } else if (s.type === "float" || s.type === "int") {
+    const isInt = s.type === "int", v0 = Math.abs(value);
+    const max = isInt ? Math.max(4, Math.ceil(v0 * 3)) : v0 <= 0.2 ? 1 : v0 <= 1 ? 2 : Math.ceil(v0 * 3);
+    const step = isInt ? 1 : v0 <= 1 ? 0.01 : v0 <= 10 ? 0.05 : 0.5;
+    // Most of these divide something: a setting that starts above zero stays above zero.
+    const positive = !isInt && value > 0, min = positive ? step : Math.min(0, value);
+    const range = document.createElement("input"); range.type = "range"; range.min = min; range.max = Math.max(max, value); range.step = step; range.setAttribute("aria-label", labelFor(s));
+    const num = document.createElement("input"); num.type = "number"; num.step = step; num.min = min; num.className = "val"; num.setAttribute("aria-label", labelFor(s));
+    setControls = () => { range.value = value; num.value = value; };
+    range.oninput = () => { value = Number(range.value); num.value = value; commit(); };
+    num.onchange = () => { let v = Number(num.value); if (!isFinite(v)) return; if (positive && v < step) v = step; value = isInt ? Math.round(v) : v; setControls(); commit(); };
+    ctl.appendChild(range); ctl.appendChild(num);
+  } else if (s.type === "vec3") {
+    const pick = document.createElement("input"); pick.type = "color"; pick.setAttribute("aria-label", labelFor(s));
+    const hex = document.createElement("input"); hex.type = "text"; hex.maxLength = 7;
+    setControls = () => { pick.value = rgbToHex(value); hex.value = pick.value; };
+    const set = c => { if (!/^#[0-9a-fA-F]{6}$/.test(c)) return; value = hexToRgb(c); setControls(); commit(); };
+    pick.oninput = () => set(pick.value); hex.onchange = () => set(hex.value.startsWith("#") ? hex.value : "#" + hex.value);
+    ctl.appendChild(pick); ctl.appendChild(hex);
+  } else {
+    const nums = value.map((v, i) => { const num = document.createElement("input"); num.type = "number"; num.step = 0.05; num.onchange = () => { const n = Number(num.value); if (isFinite(n)) { value[i] = n; commit(); } }; ctl.appendChild(num); return num; });
+    setControls = () => nums.forEach((num, i) => num.value = value[i]);
+  }
+  setControls(); markChanged();
+  const foot = document.createElement("div"); foot.className = "foot";
+  const help = document.createElement("div"); help.className = "help"; help.textContent = noteOf(s, choices ? choices.help : helpOf(s)) || "";
+  foot.appendChild(help); foot.appendChild(was); row.appendChild(foot);
+  return row;
+}
+function setSaving() { setStatus("saving", t("saving")); }
+function setStatus(kind, text) {
+  const el = $("#status"); el.className = "pill " + (kind || "");
+  if (!kind) text = STATE.savepoint ? t("liveUndo", { path: STATE.savepoint }) : t("live");
+  const full = kind === "saved" ? text + " · " + new Date().toLocaleTimeString(LANG === "zh" ? "zh-CN" : undefined) : text;
+  el.innerHTML = "<span></span>"; el.firstChild.textContent = full; el.title = full;
+  if (kind === "saved") { clearTimeout(timers.status); timers.status = setTimeout(() => setStatus(), 6000); }
+}
+async function refresh() { STATE = await post("/state"); renderList(); renderDetail(); setStatus(); }
+const toggled = (key, on) => toast(t("toggled", { what: t(key), state: t(on ? "on" : "off") }));
+$("#enterSwitch").onchange = async ev => { try { await post("/toggle", { what: "enter", on: ev.target.checked }); STATE.enter = ev.target.checked; toggled("enterSw", ev.target.checked); } catch (err) { toast(err.message); } };
+$("#jumpsSwitch").onchange = async ev => { try { const r = await post("/toggle", { what: "jumps", on: ev.target.checked }); STATE.jumps = ev.target.checked ? "on" : "off"; toggled("jumpsSw", ev.target.checked); await refresh(); } catch (err) { toast(err.message); } };
+$("#idleSwitch").onchange = async ev => { try { const r = await post("/toggle", { what: "idle", on: ev.target.checked }); STATE.idle = ev.target.checked ? "on" : "off"; toggled("idleSw", ev.target.checked); await refresh(); } catch (err) { toast(err.message); } };
+$("#doneBtn").onclick = async () => { try { await post("/quit"); } catch (err) {} document.body.innerHTML = `<p style="padding:40px;color:#9a978f">${t("closed")}</p>`; };
+$("#langBtn").onclick = () => { LANG = LANG === "zh" ? "en" : "zh"; try { localStorage.setItem("cursor-fx-lang", LANG); } catch (e) {} applyLang(); renderList(); renderDetail(); setStatus(); };
+// Typing always goes to the preview: its text field takes the focus back after any click
+// or switch, unless a text or number field (a value, a color) is being edited. A key pressed
+// while something else has the focus (a button, a slider) is passed on to the preview too.
+const isField = el => !!el && !!el.matches && el.matches('input[type=text], input[type=number], input[type=color], input[type=range]');
+function typeReady() {
+  const ime = $("#ime"), a = document.activeElement;
+  if (!ime || a === ime || isField(a) || document.hidden || !document.hasFocus()) return;
+  ime.focus({ preventScroll: true });
+}
+document.addEventListener("pointerup", () => setTimeout(typeReady, 0));
+document.addEventListener("change", ev => { if (!isField(ev.target)) setTimeout(typeReady, 0); });
+window.addEventListener("focus", () => setTimeout(typeReady, 0));
+document.addEventListener("keydown", ev => {
+  const ime = $("#ime"), tgt = ev.target;
+  if (!ime || tgt === ime || ev.isComposing) return;
+  if (isField(tgt) && !(tgt.type === "range" && ev.key.length === 1 && ev.key !== " ")) return;
+  if (ev.key === "Tab" || ev.key === "Escape" || ev.key.startsWith("Arrow") || (ev.metaKey && ev.key !== "Backspace") || ev.ctrlKey && ev.key !== "Backspace") return;
+  const onControl = tgt && tgt.matches && tgt.matches("button, summary, label, input[type=checkbox]");
+  if ((ev.key === "Enter" || ev.key === " ") && onControl) return;  // those press the control
+  if (ev.key.length === 1 || ev.key === "Backspace" || ev.key === "Enter" || ev.keyCode === 229) {
+    ime.focus({ preventScroll: true });
+    if (ev.keyCode !== 229) previewKey(ev);
+  }
+}, true);
+applyLang(); renderList(); renderDetail(); setStatus();
+</script>
+</body>
+</html>
+"""
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if len(argv) > 1 and argv[1] == "signal-off":
+        return signal_off(*argv[2:5])
+    if len(argv) > 1 and argv[1] == "signal":
+        try:
+            return signal_enter(argv)
+        except Exception:  # a hook must never fail loudly
+            return 0
+    if not os.path.isfile(CONFIG):
+        print(f"Ghostty config not found: {CONFIG}")
+        return 1
+    if len(argv) == 1:
+        return list_effects()
+    if argv[1] == "enter":
+        return set_enter(argv[2] if len(argv) > 2 else None)
+    if argv[1] in FLAGS:
+        return set_flag(argv[1], argv[2] if len(argv) > 2 else None)
+    if argv[1] == "edit":
+        return edit_panel(open_browser="--no-open" not in argv)
+    name = argv[1][:-5] if argv[1].endswith(".conf") else argv[1]  # (no str.removesuffix: Python 3.8 still works)
+    return switch(name)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

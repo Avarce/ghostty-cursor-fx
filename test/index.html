@@ -1,0 +1,171 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>glitch harness</title>
+<style>
+  body { background: #111; color: #ccc; font: 13px monospace; margin: 8px; }
+  canvas { display: block; margin: 2px 0 8px; }
+</style>
+<div id="log"></div>
+<div id="frames"></div>
+<script>
+const W = 1200, H = 420, CH = 44, PADX = 16, PADY = 12;
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const BG = '#2a2a2a', FG = '#c6bba3', CUR_TEXT = '#2a2a2a';
+const CUR = '#' + (new URLSearchParams(location.search).get('color') || 'f85552');
+const lines = ['~/Desktop/_Code-Projects/Ghostty ❯ git status',
+               'On branch main',
+               'Changes not staged for commit:',
+               '  modified:   shaders/lightning-cursor.glsl',
+               '~/Desktop/_Code-Projects/Ghostty ❯ ls',
+               'CHANGELOG.md  CLAUDE.md  shaders  themes',
+               '~/Desktop/_Code-Projects/Ghostty ❯ git commit -m "glitch',
+               '',
+               ''];
+const curRow = 6, curCol = lines[6].length;
+
+// Fake terminal screen. cursor: draw the block (blink on) or not (blink off);
+// glyph: a letter sits in the cursor cell; line6: replaces the cursor's line;
+// col: the cursor's column.
+const term = document.createElement('canvas');
+term.width = W; term.height = H;
+const tc = term.getContext('2d');
+tc.font = '30px Menlo, monospace';
+const CW = tc.measureText('M').width;
+// claude: a Claude Code-like screen instead (sent prompt on a lighter bar on row 2,
+// spinner on row 4, input box between border lines on rows 5 and 7, status row 8).
+const claudeLines = ['● Done: the effects are installed.', '', '❯ make the cursor effects awesome', '',
+                     '✻ Orchestrating…', '', '❯ ', '', '  Opus 5.5 v2.1.312 ¦ Ghostty'];
+function drawTerm({ cursor = true, glyph = false, line6 = null, col = curCol, claude = false } = {}) {
+  tc.fillStyle = BG; tc.fillRect(0, 0, W, H);
+  tc.textBaseline = 'top';
+  if (claude) {
+    tc.fillStyle = '#373737'; tc.fillRect(0, PADY + 2 * CH, W, CH);
+    tc.fillStyle = '#6a6a6a'; for (const r of [5, 7]) tc.fillRect(PADX, PADY + r * CH + CH / 2 - 1, W - 2 * PADX, 2);
+  }
+  (claude ? claudeLines : lines).forEach((l, r) => { tc.fillStyle = FG; tc.fillText(r === 6 && line6 !== null ? line6 : l, PADX, PADY + r * CH + 6); });
+  const x = PADX + col * CW, y = PADY + curRow * CH;
+  if (cursor) { tc.fillStyle = CUR; tc.fillRect(Math.round(x), y, Math.round(CW), CH); }  // whole pixels, like Ghostty
+  if (glyph) { tc.fillStyle = cursor ? CUR_TEXT : FG; tc.fillText('"', x, y + 6); }
+}
+
+// Cursor rects in Ghostty's convention: top-left corner, y measured up from the bottom.
+const rect = (row, col) => [Math.round(PADX + col * CW), H - (PADY + row * CH), Math.round(CW), CH];
+const curRect = rect(curRow, curCol);
+
+const gl = document.createElement('canvas').getContext('webgl2', { preserveDrawingBuffer: true });
+gl.canvas.width = W; gl.canvas.height = H; gl.viewport(0, 0, W, H);
+const log = m => document.getElementById('log').insertAdjacentHTML('beforeend', `<div>${m}</div>`);
+
+const PRELUDE = `#version 300 es
+precision highp float; precision highp int;
+uniform vec3 iResolution; uniform float iTime;
+uniform vec4 iCurrentCursor; uniform vec4 iPreviousCursor;
+uniform vec4 iCurrentCursorColor; uniform vec4 iPreviousCursorColor;
+uniform int iCurrentCursorStyle; uniform int iCursorVisible;
+uniform float iTimeCursorChange; uniform int iFocus;
+uniform vec3 iPalette[16];
+uniform vec3 iBackgroundColor; uniform vec3 iForegroundColor; uniform vec3 iCursorText;
+#define CURSORSTYLE_BLOCK 0
+uniform sampler2D iChannel0;
+uniform int uLinear;
+out vec4 _fragColor;
+// uLinear = 1 emulates a linear-light screen texture, 0 a plain sRGB one.
+vec4 texLin(sampler2D s, vec2 uv) { vec4 c = texture(s, uv); return uLinear == 1 ? vec4(pow(c.rgb, vec3(2.2)), c.a) : c; }
+#define texture texLin
+`;
+const POST = `
+void main() { vec4 c; mainImage(c, gl_FragCoord.xy);
+  _fragColor = vec4(uLinear == 1 ? pow(c.rgb, vec3(1.0 / 2.2)) : c.rgb, 1.0); }
+`;
+
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+window.ready = fetch(new URLSearchParams(location.search).get('shader') || 'glitch-cursor.glsl', { cache: 'no-store' }).then(r => r.text()).then(body => {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, `#version 300 es
+in vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }`));
+  // The harness is y-up like Ghostty on Linux (OpenGL), so the shader's macOS flip is turned off.
+  body = body.replace(/^#define Y_DOWN .*$/m, '#define Y_DOWN false');
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, PRELUDE + body + POST));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'pos');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const u = n => gl.getUniformLocation(prog, n);
+  gl.uniform3f(u('iResolution'), W, H, 1);
+  gl.uniform4f(u('iCurrentCursor'), ...curRect);
+  gl.uniform4f(u('iCurrentCursorColor'), ...hex(CUR), 1);
+  gl.uniform4f(u('iPreviousCursorColor'), ...hex(CUR), 1);
+  gl.uniform3f(u('iBackgroundColor'), ...hex(BG));
+  gl.uniform3f(u('iForegroundColor'), ...hex(FG));
+  gl.uniform3f(u('iCursorText'), ...hex(CUR_TEXT));
+  gl.uniform1i(u('iCurrentCursorStyle'), 0);
+  gl.uniform1i(u('iCursorVisible'), 1);
+  const pal = new Float32Array(48);
+  pal.set(hex('#d69de7'), 13 * 3); pal.set(hex('#6eceda'), 14 * 3);
+  gl.uniform3fv(u('iPalette'), pal);
+  gl.uniform1i(u('iChannel0'), 0);
+
+  // opts: screen = drawTerm options (screen.col moves the cursor), prev = [rowDelta,
+  // colDelta] of the previous cursor, linear = texture storage emulation, focus,
+  // signal = the Enter signal (odd blue bit): 'start' (now on, was off), 'on' (on
+  // before and after), 'end' (was on, now off), or none.
+  window.render = (time, change, opts = {}) => {
+    const { screen = {}, prev = [0, -1], linear = 1, focus = 1, signal = null, hidden = 0 } = opts;
+    gl.uniform1i(u('iCursorVisible'), hidden ? 0 : 1);
+    const col = screen.col ?? curCol;
+    const base = hex(CUR), odd = [base[0], base[1], (Math.round(base[2] * 255) | 1) / 255];
+    const oddG = [base[0], (Math.round(base[1] * 255) | 1) / 255, base[2]];  // 'done': the green bit instead
+    gl.uniform4f(u('iCurrentCursorColor'), ...(signal === 'start' || signal === 'on' ? odd : signal === 'done' ? oddG : base), 1);
+    gl.uniform4f(u('iPreviousCursorColor'), ...(signal === 'on' || signal === 'end' ? odd : base), 1);
+    drawTerm(screen);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, term);
+    gl.uniform4f(u('iCurrentCursor'), ...rect(curRow, col));
+    gl.uniform4f(u('iPreviousCursor'), ...rect(curRow + prev[0], col + prev[1]));
+    gl.uniform1i(u('uLinear'), linear);
+    gl.uniform1f(u('iTime'), time); gl.uniform1f(u('iTimeCursorChange'), change);
+    gl.uniform1i(u('iFocus'), focus);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const px = new Uint8Array(W * H * 4);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px;
+  };
+  window.show = label => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    c.getContext('2d').drawImage(gl.canvas, 0, 0);
+    document.getElementById('frames').insertAdjacentHTML('beforeend', `<div>${label}</div>`);
+    document.getElementById('frames').appendChild(c);
+  };
+  // Pixels that differ from the reference, and how many of them fall outside the
+  // cursor area (3.5 cells sideways, one cell up/down) and outside the previous cell.
+  window.diff = (a, b, prev = [0, -1]) => {
+    let n = 0, outside = 0;
+    const cx = curRect[0] + CW / 2, cy = curRect[1] - CH / 2;
+    const pr = rect(curRow + prev[0], curCol + prev[1]);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 3) {
+        n++;
+        const near = Math.abs(x + 0.5 - cx) <= 3.5 * CW + 1 && Math.abs(y + 0.5 - cy) <= CH + 1;
+        const onPrev = x >= pr[0] - 1 && x <= pr[0] + pr[2] + 1 && y >= pr[1] - pr[3] - 1 && y <= pr[1] + 1;
+        if (!near && !onPrev) outside++;
+      }
+    }
+    return { n, outside };
+  };
+  log(`compiled OK; cell ${CW.toFixed(1)}x${CH}px`);
+}).catch(e => { log('ERROR: ' + e.message); window.failed = e.message; });
+</script>

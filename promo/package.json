@@ -1,0 +1,13 @@
+{
+  "name": "cursor-fx-promo",
+  "private": true,
+  "type": "module",
+  "description": "Renders the Cursor FX for Ghostty promo video from the real shaders",
+  "scripts": {
+    "sheet": "node render.mjs sheet",
+    "video": "node render.mjs video"
+  },
+  "dependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}

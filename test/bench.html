@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>bench</title>
+<script>
+// GPU time per frame of shaders at a real Retina window size (2880x1658), on a screen full
+// of shell output with a prompt row, or on a Claude Code-like screen. Draws only (no readback).
+// Run in headless Chrome on the Metal GPU: await bench(['../shaders/cyber-cursor.glsl'], ['shell', 'claude'])
+// → ms per frame for each, plus "pass" (a shader that only copies the screen) as the floor.
+const W = 2880, H = 1658, CH = 46, CW = 18, PADX = 36, PADY = 24;
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const BG = '#2a2a2a', FG = '#c6bba3', CUR = '#50e080';
+const term = document.createElement('canvas'); term.width = W; term.height = H;
+const tc = term.getContext('2d');
+function drawScreen(kind) {
+  tc.fillStyle = BG; tc.fillRect(0, 0, W, H); tc.textBaseline = 'top'; tc.font = '30px Menlo, monospace';
+  const rows = Math.floor((H - 2 * PADY) / CH);
+  for (let r = 0; r < rows; r++) {
+    tc.fillStyle = FG;
+    let t = 'drwxr-xr-x  12 user  staff   384 Oct 29 10:00 shaders and more text to fill the line ' + r + ' lorem ipsum dolor sit amet consectetur';
+    if (kind === 'claude' && r >= rows - 6) t = ['', '❯ make the cursor effects awesome and fast', '', '  Opus 5.5 ¦ Ghostty', '', ''][r - (rows - 6)];
+    if (kind === 'shell' && r === rows - 1) t = '❯ ls -la';
+    tc.fillText(t, PADX, PADY + r * CH + 8);
+  }
+  if (kind === 'claude') { tc.fillStyle = '#6a6a6a'; for (const r of [rows - 6, rows - 4]) tc.fillRect(PADX, PADY + r * CH + CH / 2 - 2, W - 2 * PADX, 4); }
+  const row = kind === 'claude' ? rows - 5 : rows - 1, col = kind === 'claude' ? 42 : 8;
+  tc.fillStyle = CUR; tc.fillRect(PADX + col * CW, PADY + row * CH + 4, CW, 38);
+  return [PADX + col * CW, H - (PADY + row * CH + 4), CW, 38];
+}
+const gl = document.createElement('canvas').getContext('webgl2');
+gl.canvas.width = W; gl.canvas.height = H; gl.viewport(0, 0, W, H);
+const PRELUDE = `#version 300 es
+precision highp float; precision highp int;
+uniform vec3 iResolution; uniform float iTime;
+uniform vec4 iCurrentCursor; uniform vec4 iPreviousCursor;
+uniform vec4 iCurrentCursorColor; uniform vec4 iPreviousCursorColor;
+uniform int iCurrentCursorStyle; uniform int iCursorVisible;
+uniform float iTimeCursorChange; uniform int iFocus;
+uniform vec3 iPalette[16];
+uniform vec3 iBackgroundColor; uniform vec3 iForegroundColor; uniform vec3 iCursorText;
+#define CURSORSTYLE_BLOCK 0
+uniform sampler2D iChannel0;
+out vec4 _fragColor;
+`;
+const POST = `\nvoid main() { vec4 c; mainImage(c, gl_FragCoord.xy); _fragColor = vec4(c.rgb, 1.0); }\n`;
+const PASS = `void mainImage(out vec4 o, in vec2 f) { o = texture(iChannel0, f / iResolution.xy); }`;
+function program(body) {
+  const mk = (t, s) => { const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x)); return x; };
+  const p = gl.createProgram();
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, `#version 300 es\nin vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }`));
+  gl.attachShader(p, mk(gl.FRAGMENT_SHADER, PRELUDE + body.replace(/^#define Y_DOWN .*$/m, '#define Y_DOWN false') + POST));
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+window.bench = async (files, kinds, frames = 120) => {
+  const out = {};
+  const srcs = { pass: PASS };
+  for (const f of files) srcs[f] = await (await fetch(f, { cache: 'no-store' })).text();
+  for (const kind of kinds) {
+    const cur = drawScreen(kind);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, term);
+    for (const [name, src] of Object.entries(srcs)) {
+      const p = program(src); gl.useProgram(p);
+      const loc = gl.getAttribLocation(p, 'pos'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      const u = n => gl.getUniformLocation(p, n);
+      gl.uniform3f(u('iResolution'), W, H, 1); gl.uniform4f(u('iCurrentCursor'), ...cur); gl.uniform4f(u('iPreviousCursor'), ...cur);
+      gl.uniform4f(u('iCurrentCursorColor'), ...hex(CUR), 1); gl.uniform4f(u('iPreviousCursorColor'), ...hex(CUR), 1);
+      gl.uniform3f(u('iBackgroundColor'), ...hex(BG)); gl.uniform3f(u('iForegroundColor'), ...hex(FG)); gl.uniform3f(u('iCursorText'), ...hex(BG));
+      gl.uniform1i(u('iCurrentCursorStyle'), 0); gl.uniform1i(u('iCursorVisible'), 1); gl.uniform1i(u('iFocus'), 1); gl.uniform1i(u('iChannel0'), 0);
+      gl.uniform1f(u('iTimeCursorChange'), 1);
+      const px = new Uint8Array(4);
+      for (let i = 0; i < 10; i++) { gl.uniform1f(u('iTime'), 100 + i * 0.01); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      const t0 = performance.now();
+      for (let i = 0; i < frames; i++) { gl.uniform1f(u('iTime'), 101 + i * 0.008); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      out[`${kind} ${name.replace(/.*\//, '')}`] = +((performance.now() - t0) / frames).toFixed(3);
+    }
+  }
+  return out;
+};
+</script>
