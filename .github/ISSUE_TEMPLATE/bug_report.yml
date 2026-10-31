@@ -1,5 +1,5 @@
 name: Bug report
-description: An effect looks wrong or doesn't play, or `cursor-fx`, the settings panel or the install misbehaves.
+description: An effect looks wrong or doesn't play, or cursor-fx, the settings panel or the install misbehaves.
 labels: ["bug"]
 body:
   - type: markdown
@@ -59,10 +59,10 @@ body:
   - type: dropdown
     id: off-check
     attributes:
-      label: Does it go away with `cursor-fx off`?
+      label: Does it go away with cursor-fx off?
       options:
         - Yes, it only happens with an effect on
-        - No, it happens with `cursor-fx off` too
+        - No, it happens with cursor-fx off too
         - Didn't try
         - Not applicable (install, cursor-fx command or settings panel)
     validations:
