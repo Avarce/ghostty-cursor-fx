@@ -13,7 +13,7 @@ Switch effects with one command, tune them in a browser panel with a live previe
 
 | Effect | Cursor (its own look) | Typing | Enter |
 | --- | --- | --- | --- |
-| cyber<br><img src="media/effects/cyber.png" width="300" alt="cyber: its Enter effect in Claude Code"> | green, glyph rain inside, a scanline, a glow | each typed letter decrypts: signal lock-in, slot reel, pixel resolve or glyph flicker (your pick); Chinese you pick decrypts as a whole; your typed text and sent prompts show in green | sharp glyph rain falls through the input box, column by column, as an energy sweep runs along its lines; done: the sweeps meet in the middle |
+| cyber<br><img src="media/effects/cyber.png" width="300" alt="cyber: its Enter effect in Claude Code"> | green, glyph rain inside, a scanline, a glow | each typed letter burns in: it lands hot mint-white and cools to green, never hidden (or decrypts behind glyphs: signal lock-in, slot reel, pixel resolve, glyph flicker); Chinese you pick, as a whole; your typed text and sent prompts show in green | sharp glyph rain falls through the input box, column by column, as an energy sweep runs along its lines; done: the sweeps meet in the middle |
 | lightning<br><img src="media/effects/lightning.png" width="300" alt="lightning: its Enter effect in Claude Code"> | ice blue, small arcs crawling around it | sparks, idle crackle | a surge of current along the input box lines |
 | glitch<br><img src="media/effects/glitch.png" width="300" alt="glitch: its Enter effect in Claude Code"> | red, a corrupted signal: split color channels, scanlines, tearing now and then | tears into slices | the lines break into glitch slices |
 | neon<br><img src="media/effects/neon.png" width="300" alt="neon: its Enter effect in Claude Code"> | pink, a glowing tube with a breathing halo | flickers back on | the lines light up as neon tubes |
@@ -39,7 +39,7 @@ the box lines' color and their animated look (and blinking, off by default).
 
 Moving forward along the row counts as typing: a letter, a Chinese character, or a
 whole phrase your input method commits at once (it plays like one keystroke, never the
-delete-all move; cyber and hologram decrypt or print the whole phrase). Each effect's
+delete-all move; cyber and hologram burn in or print the whole phrase). Each effect's
 "Chinese input" switch turns that off. The prompt mark keeps its style when your prompt
 wraps onto more rows and while Ghostty isn't the focused window (it holds still then). Deleting a whole line (select all + delete, Home) plays
 each effect's big move; cursor jumps to another row stay quiet, so programs
@@ -93,6 +93,7 @@ This copies `shaders/` and `cursor-effects/` into your Ghostty config directory 
 cursor-fx lightning    # pick an effect; Ghostty reloads at once
 cursor-fx              # list them, the active one marked
 cursor-fx off          # plain cursor
+cursor-fx subtle on    # the calm version of every effect, for all-day use
 ```
 
 Copying a single shader by hand instead? On **Linux**, change `#define Y_DOWN true`
@@ -114,19 +115,41 @@ done after any command that took more than 5 seconds. (bash/fish: call
 `cursor-fx signal --tty "$(tty)"` from your pre-command hook and `cursor-fx signal
 done --tty "$(tty)"` after long commands.)
 
-Switch both off any time with `cursor-fx enter off`; `cursor-fx jumps off` silences
-the delete-all moves; `cursor-fx idle off` stops the small animations between
-keystrokes (crackle, breath, ping) for a calmer screen.
+Switch both off any time with `cursor-fx enter off` (it turns the Enter and done
+moments off in every effect; `cursor-fx enter on` brings them back); `cursor-fx jumps
+off` silences the delete-all moves; `cursor-fx idle off` stops the small animations
+between keystrokes (crackle, breath, ping) for a calmer screen.
+
+## Subtle version, and an off key
+
+The effects are tuned to be seen. For all-day use, `cursor-fx subtle on` switches every
+effect to its calm version: smaller, dimmer moments and a quieter cursor (lightning's
+bolt stays low with no branches, fireworks fire one small rocket, shockwave's rings
+shrink and barely bend the text, glitch tears a third as often). `cursor-fx subtle off`
+goes back. Each effect also has its own Subtle switch (in the panel, under Look).
+In the subtle version cyber doesn't decrypt what you type, so a typo shows at once.
+
+`cursor-fx toggle` turns the effect off, and back on to the same one. To put it on a key:
+
+- **macOS**: in the Shortcuts app, make a shortcut with a **Run Shell Script** action
+  containing `"$HOME/.local/bin/cursor-fx" toggle`, then add a keyboard shortcut in its
+  details (for example ⌃⌥⌘C). If it doesn't run, allow it in Shortcuts → Settings →
+  Advanced → Allow Running Scripts.
+- **Linux**: add a custom keyboard shortcut in your desktop's settings that runs
+  `sh -c '"$HOME/.local/bin/cursor-fx" toggle'` (desktop shortcuts don't expand `~`).
 
 ## Battery
 
 Be aware: while any animated shader is installed, Ghostty redraws the focused
-window on every screen refresh (that's how time-based effects work), and that
+terminal on every screen refresh (that's how time-based effects work), and that
 redraw is the real power cost, not the effects themselves. The shaders return
-early for pixels they don't touch, and windows in the background never animate
-(Ghostty's default). `cursor-fx idle off` makes the screen calmer but saves
-little; the only real saving on battery is `cursor-fx off`, which removes the
-shader so Ghostty redraws only when something changes.
+early for pixels they don't touch. Only the focused terminal animates: that's
+Ghostty's `custom-shader-animation = true`, the default, so ten open splits don't
+cost ten times as much. Leave it there: `always` keeps every split and tab
+animating, each one adding to the cost, and `false` stops the animation loop, so
+the effects freeze mid-move. `cursor-fx idle off` makes the screen calmer but saves
+little; the only real saving on battery is `cursor-fx off` (or `cursor-fx toggle`),
+which removes the shader so Ghostty redraws only when something changes.
 
 ## Tune it
 
@@ -139,17 +162,20 @@ the settings next to it: just type to try the effect, no click needed (Chinese a
 the line), or use its buttons for Enter, done and delete-all; zoom in on the cursor
 (2×, 4×) and slow it down (½×, ¼×) to see the details. Every effect's settings come
 in the same sections, in the same order: Typing, Enter & done, Delete-all, Cursor,
-Prompt mark ❯, Input box lines, Look and Timing. A section's on/off switch sits in its
-title (the section dims when it's off), the settings worth a tweak sit under it, and
-the rest fold under "More settings" in the same section. Every change is written to
-the shader file and Ghostty reloads; the status pill says "Saved … · Ghostty
-reloaded", changed rows show their old value with a one-click reset, and the first
-change of a session makes a backup you can roll back with one command. The cursor's
-color and "Cursor blinks" are in the Cursor section, for that effect alone. The
-switches at the top (Enter & done, delete-all, idle animations) set every effect at
-once (half-filled when effects differ). The
-page is in Chinese when your system's language is Chinese and in English
-otherwise; the button at the top switches between them (remembered by the browser).
+Prompt mark ❯, Input box lines and Look. A section's on/off switch sits in its
+title (its controls dim when it's off), the few settings worth a tweak sit under it,
+and the rest fold under "More settings" in the same section. Each number has a fixed
+range (from its note and its default), so a value can't run off into something
+broken. Every change is written to the shader file and Ghostty reloads; the status
+pill says "Saved … · Ghostty reloaded", changed rows show their old value with a
+one-click reset, "Reset to defaults" puts one effect back the way it was installed
+(it asks first), and "Undo this session" (click it twice) puts everything, including
+your Ghostty config, back to how it was before your first change. The cursor's color
+and "Cursor blinks" are in the Cursor section, for that effect alone. The switches at
+the top (Enter & done, delete-all, idle animations, subtle) set every effect at once
+(half-filled when effects differ). The page is in Chinese when your system's language
+is Chinese and in English otherwise; the button at the top switches between them
+(remembered by the browser).
 
 ## How it works
 
@@ -159,6 +185,8 @@ otherwise; the button at the top switches between them (remembered by the browse
   `cursor-fx <name>` writes one `config-file = cursor-effects/<name>.conf` line into
   your Ghostty config and reloads Ghostty (SIGUSR2).
 - Settings are the `const` lines at the top of each shader; the panel edits those lines.
+  Internal values (timings the Enter signal depends on, detection distances, caps) are
+  `#define` lines under `// --- fixed values` and stay out of the panel.
 - The Enter signal is the lowest bit of the cursor color's blue value, so every
   preset color keeps that value even.
 - The input box lines are found by looking for a thin line across the width just
@@ -183,13 +211,25 @@ It shows up in `cursor-fx` and the panel automatically. Keep the shader's
 settings as `const` lines under a `// --- settings` comment, with the rarely
 needed ones after `// --- fine-tuning ---`. A `// -- Name` line starts a section;
 use the shared ones (`Typing`, `Enter & done`, `Delete-all`, `Cursor`, `Prompt mark`,
-`Box lines`, `Look`, `Timing`) and the shared switches (`TYPE_EFFECT`, `PHRASE_EFFECT`, `ENTER_EFFECT`,
+`Box lines`, `Look`) and the shared switches (`TYPE_EFFECT`, `PHRASE_EFFECT`, `ENTER_EFFECT`,
 `DONE_EFFECT`, `JUMP_EFFECTS`, `CURSOR_EFFECT`, `PROMPT_EFFECT`, `LINE_TINT`,
-`LINE_EFFECT`, `IDLE_EFFECTS`) so the panel lays it out like the others. Write each
+`LINE_EFFECT`, `IDLE_EFFECTS`, `SUBTLE`) so the panel lays it out like the others. Write each
 note so it reads on its own. An `int` whose note ends in `: 0 one, 1 two, 2 three`
-shows as named buttons. Copy the `Y_DOWN` block from an
+shows as named buttons; a note with `(0 to 1)`, `at most N` or `(0 = none)` sets the
+range of its slider. Copy the `Y_DOWN` block from an
 existing shader, read the screen through `screenAt()` and the cursors through
 `upCursor()`.
+
+## Upgrade
+
+```sh
+git pull && ./install.sh     # or download the new ZIP and run ./install.sh in it
+```
+
+Your settings stay: whatever you changed (in the panel, with `cursor-fx`, or by hand in
+a shader or preset) is put back into the new version, and everything you never touched
+takes the new version's defaults. The installer lists what it kept, and the replaced
+files are saved in `~/ghostty-savepoints/`. `cursor-fx --version` shows what's installed.
 
 ## Uninstall
 

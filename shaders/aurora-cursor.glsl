@@ -21,7 +21,6 @@
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // a wisp of aurora light rises off the cursor and drifts away
-const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
 // -- Enter & done
 const bool  ENTER_EFFECT   = true;  // curtains along the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)
 const bool  DONE_EFFECT    = true;  // play them again, from the edges inward, when Claude finishes answering (Stop hook) or a long zsh command ends
@@ -36,29 +35,31 @@ const bool  IDLE_EFFECTS   = true;  // the faint shimmer on the cursor while idl
 const bool  PROMPT_EFFECT  = true;  // the prompt mark (❯) at the start of the cursor's line: the northern lights drifting through it
 // -- Box lines
 const bool  LINE_TINT      = true;  // the input box lines take the cursor's color (a plain color, no glow)
-const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness
+const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness (0 to 1)
 const bool  LINE_EFFECT    = false;  // the input box lines, always: ribbons of aurora colors drifting along, a faint glow above
+const float LINE_STRENGTH  = 1.0;  // how bright the animated lines are
 // -- Look
+const bool  SUBTLE         = false;  // the calm version for every day: smaller, dimmer moments and a quieter cursor (`cursor-fx subtle on|off`)
 const float BRIGHTNESS     = 1.63;   // overall strength of the light
 const float COLOR_SPEED    = 0.35;  // how fast the colors drift, in cycles per second
 
 // --- fine-tuning ---
 // -- Typing
+const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
 const float WISP_TIME      = 0.45;  // seconds a wisp lasts
 // -- Enter & done
 const float ENTER_SPREAD   = 0.3;  // seconds the light takes to run from the cursor to the edges
 // -- Delete-all
 const float SWEEP_TIME     = 0.5;  // seconds the ribbon takes to sweep the path and fade
 // -- Cursor
-const float CURSOR_STRENGTH = 1.0;  // how strong the cursor's own look is
 const float IDLE_PERIOD    = 4.0;  // seconds between the idle shimmer's chances
 const float IDLE_CHANCE    = 0.5;  // how likely the idle shimmer is each time it gets a chance (0 to 1)
 const float IDLE_DURATION  = 1.2;  // seconds an idle shimmer lasts
 // -- Box lines
-const float LINE_STRENGTH  = 1.0;   // how strong the box lines' own look is
-// -- Timing
-const float SETTLE         = 0.04;  // seconds the cursor must stay put before an effect starts
-const float JUMP_SETTLE    = 0.12;  // the same after a jump (gives the Enter signal time to arrive)
+// --- fixed values (not shown in the panel; edit them here if you must) ---
+#define CURSOR_STRENGTH 1.0  // how strong the cursor's own look is
+#define SETTLE 0.04  // seconds the cursor must stay put before an effect starts
+#define JUMP_SETTLE 0.12  // the same after a jump (gives the Enter signal time to arrive)
 
 // Ghostty hands shaders y-down pixels on macOS (Metal) and y-up ones on Linux
 // (OpenGL). The effects are written y-up (embers rise, curtains hang upward),
@@ -513,6 +514,25 @@ float clLineNear(float y0, float reach, vec2 res) {
     return -1.0;
 }
 
+// Whether a line across the window (like Claude Code's box lines) lies between heights y0 and
+// y1 (y0 < y1): a line far above the cursor is the input box's own top line only when no
+// other line is closer. Checked every pixel row (a line can be 1 px); most rows stop at
+// the first sample.
+bool clLineBetween(float y0, float y1, vec2 res) {
+    for (int i = 0; i < 2400; i++) {
+        float y = floor(y0) + 0.5 + float(i);
+        if (y >= y1) break;
+        if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.66 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (colorDist(screenAt(vec2(0.45 * res.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        return true;
+    }
+    return false;
+}
+
 // The box lines as aurora ribbons: green, teal and violet drifting along them,
 // with a faint glow rising above.
 vec3 lineLook(vec2 p, vec3 col, float lineY, float h, vec2 res, float t, float live) {
@@ -548,23 +568,42 @@ vec3 lineTint(vec2 p, vec3 col, float lineY, vec2 res) {
 vec3 linesLook(vec2 p, vec3 col) {
     vec4 cur = upCursor(iCurrentCursor);
     float h = cur.w;
-    if (p.y < cur.y - 2.6 * h || p.y > cur.y + 6.5 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    if (p.y < cur.y - 2.6 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    // Far above the cursor (a tall prompt): only the line color, on the box's own top line.
+    bool far = p.y > cur.y + 6.5 * h;
+    if (far && !(LINE_TINT && LINE_COLOR > 0.0)) return col;
+    if (far) {  // most of the screen: cheap tests first, the pixel's own color (no read) then its row
+        vec3 bg = iBackgroundColor;  // as sRGB, and roughly as linear light (squared: no pow)
+        if (distance(col, bg) < 0.03 || distance(col, bg * bg) < 0.03) return col;
+        // The whole row must look like a line across the window: ink at five points along it and
+        // background a few pixels above and below (text and a sent prompt's bar don't). These
+        // reads are the same for every pixel of the row, so they cost next to nothing.
+        vec3 bgT = screenAt(vec2(1.5) / iResolution.xy).rgb;  // the corner: background, as the texture holds it
+        float v = p.y / iResolution.y, d4 = 4.0 / iResolution.y;
+        if (distance(screenAt(vec2(0.95, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.05, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.45, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.66, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.88, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.95, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.95, v - d4)).rgb, bgT) > 0.02
+                || distance(screenAt(vec2(0.45, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.45, v - d4)).rgb, bgT) > 0.02) return col;
+    }
     vec2 res = iResolution.xy;
     bool look = LINE_EFFECT && iFocus != 0;
     // With only the line color (no LINE_EFFECT light), background pixels have nothing to do.
-    if (!look && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
+    if ((!look || far) && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
     // ...nor do pixels whose row isn't a line across the window (cheap, before the search).
-    if (!look && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
+    if ((!look || far) && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
             || colorDist(screenAt(vec2(0.95 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02)) return col;
-    float lineY = clLineNear(p.y, 0.2 * h, res);
+    float lineY = clLineNear(p.y, far ? 2.0 : 0.2 * h, res);
     if (lineY < 0.0) return col;
     // Only inside an input box: there is a box line just below the cursor too (a
     // shell, or a program with a long rule somewhere, stays plain).
     if (clLineNear(cur.y - 1.7 * h, 0.7 * h, res) < 0.0) return col;
+    if (far) return clLineBetween(cur.y + 1.0, lineY - 3.0, res) ? col : lineTint(p, col, lineY, res);
     if (LINE_TINT && LINE_COLOR > 0.0) col = lineTint(p, col, lineY, res);
     if (!look) return col;
     float t = IDLE_EFFECTS ? iTime : 0.0, live = IDLE_EFFECTS ? 1.0 : 0.0;
-    return lineLook(p, col, lineY, h, res, t, live);
+    vec3 lit = lineLook(p, col, lineY, h, res, t, live);
+    return SUBTLE ? mix(col, lit, 0.45) : lit;  // subtle: the moving look at under half (the line color stays)
 }
 
 // Everything that answers the cursor's moves and the signals (fragCoord is
@@ -660,10 +699,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
+    vec3 under = fragColor.rgb;  // the screen before the moments (the subtle version mixes back to it)
     effects(fragColor, fragCoord);
+    if (SUBTLE) fragColor.rgb = mix(under, fragColor.rgb, 0.55);
     // The line color stays when the window loses focus; the moving looks don't.
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCursorVisible != 0 && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (iCursorVisible == 0) return;
-    if (iFocus != 0 && CURSOR_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(cursorLook(fragCoord, fragColor.rgb), vec3(1.0));
-    if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0));
+    if (iFocus != 0 && CURSOR_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(cursorLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.45) : lit; }
+    if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.6) : lit; }
 }

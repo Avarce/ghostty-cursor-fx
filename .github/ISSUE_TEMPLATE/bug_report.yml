@@ -136,7 +136,7 @@ body:
     id: fx-version
     attributes:
       label: Cursor FX version
-      description: The release you downloaded, or `git rev-parse --short HEAD` in your clone.
+      description: Output of `cursor-fx --version` (from v1.1), or the release you downloaded.
       placeholder: v1.0.0
     validations:
       required: true

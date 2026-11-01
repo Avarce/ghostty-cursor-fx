@@ -16,6 +16,8 @@ y_down=false; [ "$(uname -s)" = Darwin ] && y_down=true
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 mkdir -p "$config_dir/shaders" "$config_dir/cursor-effects" "$bin_dir"
+# Upgrading: what you changed (in the panel, with cursor-fx, or by hand) goes back into the new version.
+python3 "$here/bin/cursor-fx" _keep-save "$here" "$tmp/yours.json"
 for f in "$here"/shaders/*.glsl "$here"/cursor-effects/*.conf; do
   sub="$(basename "$(dirname "$f")")"
   target="$config_dir/$sub/$(basename "$f")"
@@ -33,8 +35,9 @@ if [ -f "$bin_dir/cursor-fx" ] && ! cmp -s "$here/bin/cursor-fx" "$bin_dir/curso
 fi
 cp -p "$here/bin/cursor-fx" "$bin_dir/cursor-fx"
 chmod +x "$bin_dir/cursor-fx"
+python3 "$bin_dir/cursor-fx" _keep-apply "$tmp/yours.json" "$here"
 
-echo "Installed into $config_dir (shaders/, cursor-effects/) and $bin_dir/cursor-fx."
+echo "Installed cursor-fx $(python3 "$bin_dir/cursor-fx" --version | cut -d' ' -f2) into $config_dir (shaders/, cursor-effects/) and $bin_dir/cursor-fx."
 [ -d "$backup" ] && echo "Replaced files were saved in $backup"
 case ":$PATH:" in *":$bin_dir:"*) ;; *) echo "Note: $bin_dir is not on your PATH." ;; esac
 cat <<EOF

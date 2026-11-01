@@ -5,7 +5,7 @@ window.runEnter = async (shots = [0.1, 0.3, 0.6]) => {
   if (window.failed) return { failed: window.failed };
   const name = new URLSearchParams(location.search).get('shader');
   const src = await (await fetch(name, { cache: 'no-store' })).text();
-  const num = k => { const m = src.match(new RegExp('const float ' + k + '\\s*=\\s*([0-9.]+)')); return m ? +m[1] : null; };
+  const num = k => { const m = src.match(new RegExp('(?:const float ' + k + '\\s*=|#define ' + k + ')\\s*([0-9.]+)')); return m ? +m[1] : null; };  // a setting, or a fixed #define
   const ET = num('ENTER_TIME') ?? num('SEND_DURATION') ?? 1.0;
   const S = num('SETTLE'), JS = num('JUMP_SETTLE');
   const claude = { claude: true, line6: '❯ ', col: 2 };

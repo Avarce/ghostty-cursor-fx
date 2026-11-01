@@ -1,7 +1,8 @@
 // Cyber cursor for Ghostty (`custom-shader`).
-// Data rain. Each character you type is decrypted: it hides behind flickering
-// glyphs for a moment before it shows (DECODE_STYLE: a glyph flicker, a slot
-// reel, a pixel resolve or a signal lock-in; TYPE_BEAM: a scan beam burns it in);
+// Data rain. Each character you type burns in: it lands hot, mint white with a tight
+// glow on its strokes, and cools to its color (DECODE_STYLE 4, the letter is never
+// hidden), or is decrypted behind glyphs in one of the older styles (a glyph flicker,
+// a slot reel, a pixel resolve or a signal lock-in; TYPE_BEAM: a scan beam burns it in);
 // TYPE_PULSE sends data packets along the input box lines, WORD_DECODE
 // re-decrypts a finished word when you type a space, TYPE_KICK runs a scanline
 // down the cursor. Nothing falls out of the input row. Chinese (an input method):
@@ -29,13 +30,8 @@
 
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
-const bool  TYPE_EFFECT    = true;  // each character you type decrypts (Chinese you pick decrypts as a whole)
-const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
-const int   DECODE_STYLE   = 0;  // how each letter decrypts: 0 glyph flicker, 1 slot reel, 2 pixel resolve, 3 signal lock-in
-const bool  WORD_DECODE    = false;  // typing a space: the word you just finished re-decrypts, left to right
-const bool  TYPE_PULSE     = false;  // each key sends two data packets along the input box lines, away from the cursor
-const bool  TYPE_BEAM      = false;  // a scan beam sweeps the decrypted letter and burns it in (glyph flicker style)
-const bool  TYPE_KICK      = true;  // a scanline runs down the cursor with a pulse of glow
+const bool  TYPE_EFFECT    = true;  // each character you type burns in or decrypts (Chinese you pick, as a whole)
+const int   DECODE_STYLE   = 4;  // how each letter appears: 0 glyph flicker, 1 slot reel, 2 pixel resolve, 3 signal lock-in, 4 burn-in
 // -- Enter & done
 const bool  ENTER_EFFECT   = true; // rain through the input box on Enter (`cursor-fx enter off` pauses every effect's Enter)
 const bool  DONE_EFFECT    = true;  // rain again, starting at the edges, when Claude finishes answering (Stop hook) or a long zsh command ends
@@ -50,30 +46,28 @@ const float CURSOR_GLOW    = 0.6;   // strength of the glow around the cursor
 const bool  PROMPT_EFFECT  = true;  // the prompt mark (❯) at the start of the cursor's line: netrunner green, decrypting into a glyph now and then
 // -- Box lines
 const bool  LINE_TINT      = true;  // the input box lines take the cursor's color (a plain color, no glow)
-const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness
+const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness (0 to 1)
 const bool  LINE_EFFECT    = false;  // the input box lines, always: data buses: faint dashes streaming along
+const float LINE_STRENGTH  = 1.0;  // how bright the animated lines are
 // -- Your text
 const bool  TEXT_COLOR     = true;  // your text in the cursor's color (Claude Code's input box and your sent prompts, zsh's command line), as easy to read as the terminal's text; dim and colored text stay as they are
 // -- Look
+const bool  SUBTLE         = false;  // the calm version for every day: smaller, dimmer moments and a quieter cursor (`cursor-fx subtle on|off`)
 const vec3  RAIN_COLOR     = vec3(0.35, 1.0, 0.55);  // the glyphs near the head of each rain column
 const vec3  TRAIL_COLOR    = vec3(0.0, 0.55, 0.45);  // the color the rain fades to toward the end of its trail
 const float BRIGHTNESS     = 1.0;   // overall strength of the light
 
 // --- fine-tuning ---
 // -- Typing
-const float DECODE_TIME    = 0.22;  // seconds the character you typed stays hidden behind glyphs
-const float TYPE_TIME      = 0.45;  // seconds the typing light lasts (packets, word wave)
-const float PULSE_REACH    = 7.0;  // how far the packets travel, in characters
-const float WORD_WAVE      = 0.035;  // word decrypt: seconds from one letter to the next
+const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
+const float DECODE_TIME    = 0.22;  // seconds a typed character's effect lasts (the glyph styles hide it that long)
 const float PHRASE_TIME    = 0.16;  // Chinese input: seconds a character or phrase you pick takes to decrypt, all of it (quicker than a letter's, so you can read along)
 // -- Enter & done
 const float ENTER_SPREAD   = 0.35;  // seconds the rain's start takes to spread from the cursor to the edges
 const float RAIN_SPEED     = 6.0;   // how fast a column falls, in character heights per second
 const float TRAIL          = 6.0;   // glyphs in a column's trail
 const float DENSITY        = 0.5;   // share of the columns that rain
-const float DEPTH          = 0.0;   // brightness of the smaller, slower rain layer behind (0 = none)
 const float GLYPH_SIZE     = 0.62;  // glyph height, in character heights
-const float RAIN_HEIGHT    = 0.0;   // the rain starts this far above the top box line, in character heights
 // -- Delete-all
 const float DISSOLVE_TIME  = 0.7;  // seconds the row's rain lasts
 // -- Cursor
@@ -84,12 +78,20 @@ const float CURSOR_SHADE   = 0.3;  // how much darker than the block those glyph
 const float SCAN_PERIOD    = 2.6;  // seconds between scanlines sweeping down the cursor
 const float BREATH_PERIOD  = 3.0;  // seconds per breath of the cursor's glow
 // -- Box lines
-const float LINE_STRENGTH  = 1.0;   // how strong the box lines' own look is
 // -- Your text
 const float TEXT_TINT      = 1.0;  // how much of the cursor's color your text takes
-// -- Timing
-const float SETTLE         = 0.04;  // seconds the cursor must stay put before an effect starts
-const float JUMP_SETTLE    = 0.12;  // the same after a jump (gives the Enter signal time to arrive)
+// --- fixed values (not shown in the panel; edit them here if you must) ---
+#define TYPE_BEAM false  // a scan beam sweeps the decrypted letter and burns it in (glyph flicker style)
+#define TYPE_PULSE false  // each key sends two data packets along the input box lines, away from the cursor
+#define PULSE_REACH 7.0  // how far the packets travel, in characters
+#define TYPE_TIME 0.45  // seconds the typing light lasts (packets, word wave)
+#define WORD_DECODE false  // typing a space: the word you just finished re-decrypts, left to right
+#define WORD_WAVE 0.035  // word decrypt: seconds from one letter to the next
+#define TYPE_KICK true  // a scanline runs down the cursor with a pulse of glow
+#define DEPTH 0.0   // brightness of the smaller, slower rain layer behind (0 = none)
+#define RAIN_HEIGHT 0.0   // the rain starts this far above the top box line, in character heights
+#define SETTLE 0.04  // seconds the cursor must stay put before an effect starts
+#define JUMP_SETTLE 0.12  // the same after a jump (gives the Enter signal time to arrive)
 
 // Ghostty hands shaders y-down pixels on macOS (Metal) and y-up ones on Linux
 // (OpenGL). The effects are written y-up (embers rise, curtains hang upward),
@@ -740,6 +742,25 @@ float clLineNear(float y0, float reach, vec2 res) {
     return -1.0;
 }
 
+// Whether a line across the window (like Claude Code's box lines) lies between heights y0 and
+// y1 (y0 < y1): a line far above the cursor is the input box's own top line only when no
+// other line is closer. Checked every pixel row (a line can be 1 px); most rows stop at
+// the first sample.
+bool clLineBetween(float y0, float y1, vec2 res) {
+    for (int i = 0; i < 2400; i++) {
+        float y = floor(y0) + 0.5 + float(i);
+        if (y >= y1) break;
+        if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.66 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (colorDist(screenAt(vec2(0.45 * res.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        return true;
+    }
+    return false;
+}
+
 // LINE_COLOR: the box line's own pixels take the cursor's hue at about the line's own
 // brightness. Done in the screen texture's own color space (found from the background),
 // subtracting the line's grey and adding the new color, so anything drawn over the line
@@ -774,19 +795,40 @@ vec3 lineLook(vec2 p, vec3 col, float lineY, float h, vec2 res, float t, float l
 vec3 linesLook(vec2 p, vec3 col) {
     vec4 cur = upCursor(iCurrentCursor);
     float h = cur.w;
-    if (p.y < cur.y - 2.6 * h || p.y > cur.y + 6.5 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    if (p.y < cur.y - 2.6 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    // Far above the cursor (a tall prompt): only the line color, on the box's own top line.
+    bool far = p.y > cur.y + 6.5 * h;
+    if (far && !(LINE_TINT && LINE_COLOR > 0.0)) return col;
+    if (far) {  // most of the screen: cheap tests first, the pixel's own color (no read) then its row
+        vec3 bg = iBackgroundColor;  // as sRGB, and roughly as linear light (squared: no pow)
+        if (distance(col, bg) < 0.03 || distance(col, bg * bg) < 0.03) return col;
+        // The whole row must look like a line across the window: ink at five points along it and
+        // background a few pixels above and below (text and a sent prompt's bar don't). These
+        // reads are the same for every pixel of the row, so they cost next to nothing.
+        vec3 bgT = screenAt(vec2(1.5) / iResolution.xy).rgb;  // the corner: background, as the texture holds it
+        float v = p.y / iResolution.y, d4 = 4.0 / iResolution.y;
+        if (distance(screenAt(vec2(0.95, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.05, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.45, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.66, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.88, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.95, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.95, v - d4)).rgb, bgT) > 0.02
+                || distance(screenAt(vec2(0.45, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.45, v - d4)).rgb, bgT) > 0.02) return col;
+    }
     vec2 res = iResolution.xy;
     // With only the line color (no LINE_EFFECT light), background pixels have nothing to do.
-    if (!LINE_EFFECT && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
-    float lineY = clLineNear(p.y, 0.2 * h, res);
+    if ((!LINE_EFFECT || far) && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
+    if (far && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
+            || colorDist(screenAt(vec2(0.95 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02)) return col;
+    float lineY = clLineNear(p.y, far ? 2.0 : 0.2 * h, res);
     if (lineY < 0.0) return col;
     // Only inside an input box: there is a box line just below the cursor too (a
     // shell, or a program with a long rule somewhere, stays plain).
     if (clLineNear(cur.y - 1.7 * h, 0.7 * h, res) < 0.0) return col;
+    if (far) return clLineBetween(cur.y + 1.0, lineY - 3.0, res) ? col : lineTint(p, col, lineY, res);
     if (LINE_TINT && LINE_COLOR > 0.0) col = lineTint(p, col, lineY, res);
     if (!LINE_EFFECT) return col;
     float t = IDLE_EFFECTS ? iTime : 0.0, live = IDLE_EFFECTS ? 1.0 : 0.0;
-    return lineLook(p, col, lineY, h, res, t, live);
+    vec3 lit = lineLook(p, col, lineY, h, res, t, live);
+    return SUBTLE ? mix(col, lit, 0.45) : lit;  // subtle: the moving look at under half (the line color stays)
 }
 
 // --- The typed text's color (TEXT_COLOR) ---
@@ -987,6 +1029,9 @@ bool glyphAcross(float x, vec2 lo, vec4 cur, vec2 res) {
 vec3 decrypt(inout vec3 col, vec2 p, float x0, float x1, float cw, vec2 lo, vec2 hi, vec4 cur, float t, float dur, float seed, vec3 c1, vec2 res) {
     float u = t / dur, wd = x1 - x0;
     vec3 light = vec3(0.0);
+    if (SUBTLE) return light;  // the subtle version doesn't decrypt: the letter just shows
+    // Burn-in (4) never hides the letter: typeLook() lights it after its color is set.
+    if (DECODE_STYLE >= 4) return light;
     vec3 bg = screenAt(vec2(x0 + 1.5, hi.y - 1.5) / res).rgb;  // the slot's corner: background
     float letter = smoothstep(0.015, 0.06, colorDist(col, iBackgroundColor));
     float sw = max(1.2, 0.07 * cur.w);
@@ -1071,6 +1116,52 @@ vec3 decrypt(inout vec3 col, vec2 p, float x0, float x1, float cw, vec2 lo, vec2
                * (TYPE_BEAM ? ahead : 1.0 - smoothstep(0.55, 0.9, u)) * BRIGHTNESS;
     }
     return light;
+}
+
+// How much text ink the screen has at `at`, 0 (background) to 1 (full text), from its
+// brightness between the background's (lb) and the text color's (lf), in linear light.
+float tfInk(vec2 at, float lb, float lf, bool lin, vec2 res) {
+    vec3 s = screenAt(at / res).rgb;
+    float d = lf - lb;
+    return abs(d) < 1e-3 ? 0.0 : clamp((luma(lin ? s : sRGBToLinear(s)) - lb) / d, 0.0, 1.0);
+}
+
+// Burn-in (DECODE_STYLE 4) of a typed character, drawn after the text's own color
+// (TEXT_COLOR), so the light fades back to exactly that: the letter lands hot, a mint
+// white, with a tight glow along its strokes, and cools to its color. It always shows,
+// stays inside its cell and is mostly over within 80 ms (typing fast, the next key ends
+// it after about 85 ms).
+vec3 typeLook(vec2 p, vec3 col, float typed) {
+    vec2 res = iResolution.xy;
+    vec4 cur = upCursor(iCurrentCursor);
+    float n = floor(typed) - 1.0, cw = cellWOf(cur);
+    float x0 = upCursor(iPreviousCursor).x + floor(0.5 * n) * cw, wd = (mod(n, 2.0) > 0.5 ? 2.0 : 1.0) * cw;
+    float x1 = x0 + wd, h = cur.w, lo = cur.y - h, hi = cur.y;
+    float tau = fract(typed) / 0.999 * DECODE_TIME;  // a letter's seconds (Chinese input runs faster)
+    vec3 bgT = screenAt(vec2(x0 + 1.5, hi - 1.5) / res).rgb;  // the cell's corner: background
+    bool lin = distance(bgT, sRGBToLinear(iBackgroundColor)) < distance(bgT, iBackgroundColor);
+    vec3 bg = lin ? bgT : sRGBToLinear(bgT), c = lin ? col : sRGBToLinear(col);
+    float lb = luma(bg), lf = luma(sRGBToLinear(iForegroundColor));
+    float ink = tfInk(p, lb, lf, lin, res);
+    vec3 k = sRGBToLinear(iCurrentCursorColor.rgb), kn = k / max(luma(k), 1e-3);
+    // Hot: the cursor's hue half-way to white, 25 % of the way from the text's brightness
+    // to white, and never past 9.3:1 against the background (easy on the eyes: text stays
+    // within 7 to 9.5:1, so on a very dark background the letter only warms up a little).
+    vec3 hot = min(mix(kn, vec3(1.0), 0.5) * mix(lf, lb > lf ? 0.0 : 1.0, 0.25), vec3(1.0));
+    if (lb < lf) hot *= min(1.0, (9.3 * (lb + 0.05) - 0.05) / max(luma(hot), 1e-4));
+    vec3 hotPx = bg + ink * (hot - bg);
+    vec3 o = c;
+    {
+        float heat = min(1.0, BRIGHTNESS) * exp(-tau / 0.045) * (1.0 - smoothstep(0.12, 0.2, tau));
+        // The glow: the letter's ink around this pixel, on two tight rings.
+        float r = max(1.0, 0.035 * h), g = 0.0;
+        for (int i = 0; i < 8; i++) {
+            vec2 d = vec2(cos(float(i) * 0.7854), sin(float(i) * 0.7854));
+            g += 0.6 * tfInk(p + r * d, lb, lf, lin, res) + 0.4 * tfInk(p + 2.0 * r * d, lb, lf, lin, res);
+        }
+        o = mix(c, hotPx, heat) + kn * lf * (g / 8.0) * (1.0 - ink) * 0.9 * heat;
+    }
+    return lin ? o : linearToSRGB(max(o, 0.0));
 }
 
 // TYPE_PULSE: two packets of data shoot along each input box line, out from the
@@ -1188,10 +1279,16 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
             // An empty cell (a space) has nothing to decrypt.
             if (tk < dur && cellInk(x0, x1 - x0, lo, cur, res)) {
                 if (tk < 0.0) {
+                    if (DECODE_STYLE >= 4 || SUBTLE) {} else {  // burn-in and the subtle version leave a phrase's later characters as they are
                     float letter = smoothstep(0.015, 0.06, colorDist(fragColor.rgb, iBackgroundColor));
                     fragColor.rgb = mix(fragColor.rgb, screenAt(vec2(x0 + 1.5, hi.y - 1.5) / res).rgb, letter);
+                    }
                 } else {
                     light += decrypt(fragColor.rgb, p, x0, x1, cw, lo, hi, cur, tk, dur, hash11(iTimeCursorChange + ks * 7.31), c1, res);
+                    // Burn-in is drawn after the text color (typeLook()); which character this
+                    // pixel is in goes along as a negative alpha (a real one is never below 0):
+                    // 1 + 2 x its first cell + 1 if it is two cells wide, how far along as the fraction.
+                    if (DECODE_STYLE >= 4 && !SUBTLE) fragColor.a = -(1.0 + 2.0 * ks + (wide ? 1.0 : 0.0) + 0.999 * clamp(tk / dur, 0.0, 1.0));
                 }
             }
         }
@@ -1228,10 +1325,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = screenAt(fragCoord / res);
     // The moving effects play only in the focused window; the colors (your text, the box
     // lines, the prompt mark) stay when you switch to another window or Space.
+    vec3 under = fragColor.rgb;  // the screen before the moments (the subtle version mixes back to it)
     if (iFocus != 0 && iCursorVisible != 0) effects(fragColor, fragCoord);
+    if (SUBTLE) fragColor.rgb = mix(under, fragColor.rgb, 0.55);
     if (TEXT_COLOR && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = clamp(textTint(fragCoord, fragColor.rgb, res), 0.0, 1.0);
+    if (DECODE_STYLE >= 4 && fragColor.a < 0.0) {
+        fragColor.rgb = clamp(typeLook(fragCoord, fragColor.rgb, -fragColor.a), 0.0, 1.0);
+        fragColor.a = screenAt(fragCoord / res).a;
+    }
     if (iCursorVisible == 0 || iCurrentCursorStyle != CURSORSTYLE_BLOCK) return;
     if (LINE_EFFECT || (LINE_TINT && LINE_COLOR > 0.0)) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
-    if (CURSOR_EFFECT && iFocus != 0) fragColor.rgb = min(cursorLook(fragCoord, fragColor.rgb, res, sRGBToLinear(RAIN_COLOR)), vec3(1.0));
-    if (PROMPT_EFFECT) fragColor.rgb = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0));
+    if (CURSOR_EFFECT && iFocus != 0) { vec3 lit = min(cursorLook(fragCoord, fragColor.rgb, res, sRGBToLinear(RAIN_COLOR)), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.45) : lit; }
+    if (PROMPT_EFFECT) { vec3 lit = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.6) : lit; }
 }

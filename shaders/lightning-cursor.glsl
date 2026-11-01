@@ -24,7 +24,6 @@
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // sparks fly off the cursor with every keystroke
-const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
 const float SPARKS         = 4.0;   // sparks per keystroke
 // -- Enter & done
 const bool  ENTER_EFFECT   = true;  // surge along the input box lines on Enter (`cursor-fx enter off` pauses every effect's Enter)
@@ -35,45 +34,47 @@ const bool  JUMP_EFFECTS   = true;  // strike a bolt when the cursor jumps along
 // -- Cursor
 const bool  CURSOR_EFFECT  = true;  // the cursor's own look: charged, small arcs of current jumping around it
 const bool  IDLE_EFFECTS   = true;  // the faint idle crackle (`cursor-fx idle on|off`; off keeps the screen calm)
-const float IDLE_CHANCE    = 0.5;  // how likely the faint idle crackle is each time it gets a chance (0 to 1)
 // -- Prompt mark
 const bool  PROMPT_EFFECT  = true;  // the prompt mark (❯) at the start of the cursor's line: charged: ice-blue with a white-hot core that flickers, a spark running along it
 // -- Box lines
 const bool  LINE_TINT      = true;  // the input box lines take the cursor's color (a plain color, no glow)
-const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness
+const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness (0 to 1)
 const bool  LINE_EFFECT    = false;  // the input box lines, always: a live wire: current flowing along them, a spark running across now and then
+const float LINE_STRENGTH  = 1.0;  // how bright the animated lines are
 // -- Look
+const bool  SUBTLE         = false;  // the calm version for every day: smaller, dimmer moments and a quieter cursor (`cursor-fx subtle on|off`)
 const vec3  BOLT_COLOR     = vec3(0.30, 0.62, 1.00);  // the glow of the bolts and sparks
 const vec3  CORE_COLOR     = vec3(0.88, 0.95, 1.00);  // their hot center
 const float GLOW_RADIUS    = 0.35;  // how far the glow reaches, in character heights
 
 // --- fine-tuning ---
 // -- Typing
+const bool  PHRASE_EFFECT  = true;  // picking a character or phrase from your input method plays the typing effect too (like one keystroke)
 const float SPARK_DURATION = 0.2;  // seconds the sparks last
 const bool  TYPING_LINE_SPARK = false;  // each keystroke also throws a spark from the cursor to a box line
-const float LINE_CRACKLE   = 2.0;  // how far the line crackles either side of where that spark lands, in characters
 // -- Enter & done
 const float SURGE_TIME     = 0.3;  // seconds the surge's head takes to cross the window
-const float LINE_REACH     = 0.8;  // how close to a box line the surge lights pixels, in character heights
 // -- Delete-all
-const float BOLT_MIN_CELLS = 3.0;  // moves this long or longer are a jump (in characters; a row counts as two)
 const float BOLT_DURATION  = 0.35;  // seconds a bolt flickers
 const float BOLT_JAGGED    = 0.12;  // how far a bolt wanders sideways, as a share of its length
-const float MAX_JAGGED     = 2.5;  // the most a bolt wanders sideways, in character heights
 const float BRANCHES       = 2.0;   // side branches per bolt
-const float MAX_BRANCH     = 4.0;   // longest side branch, in character heights
 // -- Cursor
-const float CURSOR_STRENGTH = 1.0;  // how strong the cursor's own look is
+const float IDLE_CHANCE    = 0.5;  // how likely the faint idle crackle is each time it gets a chance (0 to 1)
 const float IDLE_PERIOD    = 3.0;  // seconds between the idle crackle's chances
 const float IDLE_DURATION  = 0.15;  // seconds an idle crackle lasts
 // -- Box lines
-const float LINE_STRENGTH  = 1.0;   // how strong the box lines' own look is
 // -- Look
 const float BOLT_WIDTH     = 0.06;  // the hot core's thickness, in character heights
-const float FLICKER_RATE   = 30.0;  // flicker steps per second
-// -- Timing
-const float SETTLE         = 0.04;  // seconds the cursor must stay put before an effect starts
-const float JUMP_SETTLE    = 0.12;  // the same after a jump (gives the Enter signal time to arrive)
+// --- fixed values (not shown in the panel; edit them here if you must) ---
+#define LINE_CRACKLE 2.0  // how far the line crackles either side of where that spark lands, in characters
+#define LINE_REACH 0.8  // how close to a box line the surge lights pixels, in character heights
+#define BOLT_MIN_CELLS 3.0  // moves this long or longer are a jump (in characters; a row counts as two)
+#define MAX_JAGGED 2.5  // the most a bolt wanders sideways, in character heights
+#define MAX_BRANCH 4.0   // longest side branch, in character heights
+#define CURSOR_STRENGTH 1.0  // how strong the cursor's own look is
+#define FLICKER_RATE 30.0  // flicker steps per second
+#define SETTLE 0.04  // seconds the cursor must stay put before an effect starts
+#define JUMP_SETTLE 0.12  // the same after a jump (gives the Enter signal time to arrive)
 
 // Ghostty hands shaders y-down pixels on macOS (Metal) and y-up ones on Linux
 // (OpenGL). The effects are written y-up (embers rise, curtains hang upward),
@@ -282,7 +283,7 @@ float boxLineY(vec2 p, vec2 center, vec4 cur, vec2 res, float reach) {
 // fades over SEND_DURATION. t = seconds in.
 vec3 surge(vec2 p, float lineY, float x0, float t, vec2 res, float cellH, float cellW, bool inward) {
     vec3 glowCol = sRGBToLinear(BOLT_COLOR);
-    float glowPx = GLOW_RADIUS * cellH;
+    float glowPx = GLOW_RADIUS * cellH * (SUBTLE ? 0.45 : 1.0);  // subtle: a tighter glow, one strand, no sparks
     float frontDist = t / SURGE_TIME * res.x;
     float side = inward ? (p.x < 0.5 * res.x ? 1.0 : -1.0) : (p.x < x0 ? -1.0 : 1.0);  // which way the head moves here
     float origin = inward ? (p.x < 0.5 * res.x ? 0.0 : res.x) : x0;                        // where it started on this side
@@ -290,23 +291,25 @@ vec3 surge(vec2 p, float lineY, float x0, float t, vec2 res, float cellH, float 
     float behind = frontDist - abs(p.x - origin);  // > 0 once the head has passed this pixel
     float dy = p.y - lineY;
     float fade = pow(max(0.0, 1.0 - t / SEND_DURATION), 1.5) * flickerOn(t);
-    float edge = 1.0 - smoothstep(0.7, 1.0, abs(dy) / (LINE_REACH * cellH));  // nothing beyond LINE_REACH
+    float edge = 1.0 - smoothstep(0.7, 1.0, abs(dy) / (LINE_REACH * cellH * (SUBTLE ? 0.5 : 1.0)));  // nothing beyond LINE_REACH
     float tick = floor(t * FLICKER_RATE);
     vec3 light = vec3(0.0);
 
-    float head = exp(-length(vec2(p.x - headX, dy)) / (0.5 * cellH));
+    float head = exp(-length(vec2(p.x - headX, dy)) / ((SUBTLE ? 0.3 : 0.5) * cellH));
     light += (sRGBToLinear(CORE_COLOR) * 0.5 + glowCol) * head * fade;
 
     if (behind > 0.0) {
         float hot = exp(-behind / (0.12 * res.x));  // brightest just behind the head
         float level = 0.35 + 0.65 * hot;
         for (int k = 0; k < 3; k++) {
+            if (SUBTLE && k > 0) break;
             float fk = float(k);
             float off = wander(p.x / cellW * (0.5 + 0.35 * fk), tick * 0.37 + fk * 7.0 + lineY * 0.01) * (0.07 + 0.08 * fk) * cellH;
             float w = k == 0 ? 1.0 : 0.55;
             light += boltLightC(abs(dy - off), BOLT_WIDTH * cellH * w, glowPx * w, level * fade * (k == 0 ? 1.0 : 0.5), glowCol);
         }
         for (int k = 0; k < 4; k++) {
+            if (SUBTLE) break;
             float fk = float(k);
             float h1 = hash11(tick * 3.3 + fk * 1.7 + lineY), h2 = hash11(tick * 5.1 + fk * 2.9 + lineY);
             float h3 = hash11(tick * 7.7 + fk * 4.3 + lineY);
@@ -586,6 +589,25 @@ float clLineNear(float y0, float reach, vec2 res) {
     return -1.0;
 }
 
+// Whether a line across the window (like Claude Code's box lines) lies between heights y0 and
+// y1 (y0 < y1): a line far above the cursor is the input box's own top line only when no
+// other line is closer. Checked every pixel row (a line can be 1 px); most rows stop at
+// the first sample.
+bool clLineBetween(float y0, float y1, vec2 res) {
+    for (int i = 0; i < 2400; i++) {
+        float y = floor(y0) + 0.5 + float(i);
+        if (y >= y1) break;
+        if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+                || colorDist(screenAt(vec2(0.66 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (colorDist(screenAt(vec2(0.45 * res.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+                || colorDist(screenAt(vec2(0.45 * res.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        return true;
+    }
+    return false;
+}
+
 // The box lines as live wires: a faint ice-blue current flowing along them,
 // and every few seconds a spark running across with a short tail.
 vec3 lineLook(vec2 p, vec3 col, float lineY, float h, vec2 res, float t, float live) {
@@ -623,23 +645,42 @@ vec3 lineTint(vec2 p, vec3 col, float lineY, vec2 res) {
 vec3 linesLook(vec2 p, vec3 col) {
     vec4 cur = upCursor(iCurrentCursor);
     float h = cur.w;
-    if (p.y < cur.y - 2.6 * h || p.y > cur.y + 6.5 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    if (p.y < cur.y - 2.6 * h || (p.y > cur.y - h && p.y < cur.y)) return col;
+    // Far above the cursor (a tall prompt): only the line color, on the box's own top line.
+    bool far = p.y > cur.y + 6.5 * h;
+    if (far && !(LINE_TINT && LINE_COLOR > 0.0)) return col;
+    if (far) {  // most of the screen: cheap tests first, the pixel's own color (no read) then its row
+        vec3 bg = iBackgroundColor;  // as sRGB, and roughly as linear light (squared: no pow)
+        if (distance(col, bg) < 0.03 || distance(col, bg * bg) < 0.03) return col;
+        // The whole row must look like a line across the window: ink at five points along it and
+        // background a few pixels above and below (text and a sent prompt's bar don't). These
+        // reads are the same for every pixel of the row, so they cost next to nothing.
+        vec3 bgT = screenAt(vec2(1.5) / iResolution.xy).rgb;  // the corner: background, as the texture holds it
+        float v = p.y / iResolution.y, d4 = 4.0 / iResolution.y;
+        if (distance(screenAt(vec2(0.95, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.05, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.45, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.66, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.88, v)).rgb, bgT) < 0.02
+                || distance(screenAt(vec2(0.95, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.95, v - d4)).rgb, bgT) > 0.02
+                || distance(screenAt(vec2(0.45, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.45, v - d4)).rgb, bgT) > 0.02) return col;
+    }
     vec2 res = iResolution.xy;
     bool look = LINE_EFFECT && iFocus != 0;
     // With only the line color (no LINE_EFFECT light), background pixels have nothing to do.
-    if (!look && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
+    if ((!look || far) && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
     // ...nor do pixels whose row isn't a line across the window (cheap, before the search).
-    if (!look && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
+    if ((!look || far) && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
             || colorDist(screenAt(vec2(0.95 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02)) return col;
-    float lineY = clLineNear(p.y, 0.2 * h, res);
+    float lineY = clLineNear(p.y, far ? 2.0 : 0.2 * h, res);
     if (lineY < 0.0) return col;
     // Only inside an input box: there is a box line just below the cursor too (a
     // shell, or a program with a long rule somewhere, stays plain).
     if (clLineNear(cur.y - 1.7 * h, 0.7 * h, res) < 0.0) return col;
+    if (far) return clLineBetween(cur.y + 1.0, lineY - 3.0, res) ? col : lineTint(p, col, lineY, res);
     if (LINE_TINT && LINE_COLOR > 0.0) col = lineTint(p, col, lineY, res);
     if (!look) return col;
     float t = IDLE_EFFECTS ? iTime : 0.0, live = IDLE_EFFECTS ? 1.0 : 0.0;
-    return lineLook(p, col, lineY, h, res, t, live);
+    vec3 lit = lineLook(p, col, lineY, h, res, t, live);
+    return SUBTLE ? mix(col, lit, 0.45) : lit;  // subtle: the moving look at under half (the line color stays)
 }
 
 // Everything that answers the cursor's moves and the signals (fragCoord is
@@ -703,15 +744,16 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
     if (!bolt && !send && sparkStrength <= 0.0) return;
 
     vec2 p = fragCoord;
-    float glowPx = GLOW_RADIUS * cellH;
+    float glowPx = GLOW_RADIUS * cellH * (SUBTLE ? 0.5 : 1.0);
     vec3 light = vec3(0.0);
 
-    // The bolt along the row, from the old position to the new one, with side branches.
+    // The bolt along the row, from the old position to the new one, with side branches
+    // (subtle: a low bolt that stays near the row, no branches).
     if (bolt) {
         vec2 to = center;
         float len = distance(from, to);
-        float jag = min(BOLT_JAGGED * len, MAX_JAGGED * cellH);
-        float branchMax = min(0.25 * len, MAX_BRANCH * cellH);
+        float jag = min(BOLT_JAGGED * len, MAX_JAGGED * cellH) * (SUBTLE ? 0.25 : 1.0);
+        float branchMax = SUBTLE ? 0.0 : min(0.25 * len, MAX_BRANCH * cellH);
         float reach = jag + branchMax + 8.0 * glowPx;
         if (segDist(p, from, to) < reach) {
             // Flicker: the first two steps always strike, later ones at random,
@@ -722,7 +764,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
 
             vec2 dir = (to - from) / max(len, 1e-3);
             for (float k = 0.0; k < 4.0; k += 1.0) {
-                if (k >= BRANCHES) break;
+                if (k >= BRANCHES || SUBTLE) break;
                 vec2 start = boltPoint(from, to, 0.2 + 0.6 * hash11(seed + k * 3.7), jag, seed);
                 float side = hash11(seed + k * 5.3) < 0.5 ? -1.0 : 1.0;
                 float ang = side * (0.3 + 0.5 * hash11(seed + k * 6.1));
@@ -736,7 +778,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
 
             // Flash where it lands, fading out within 0.1s.
             float flash = 1.0 - smoothstep(0.0, 2.0 * cellH, distance(p, to));
-            light += sRGBToLinear(BOLT_COLOR) * flash * 0.35 * max(0.0, 1.0 - sinceMove / 0.1);
+            light += sRGBToLinear(BOLT_COLOR) * flash * (SUBTLE ? 0.1 : 0.35) * max(0.0, 1.0 - sinceMove / 0.1);
         }
     }
 
@@ -746,13 +788,14 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
     float tick = mod(floor(iTime * FLICKER_RATE), 1000.0);
     if (drawn && all(lessThan(abs(p - center), hs + vec2(2.3 * cellH)))) {
         float count = idleNow && sparkE <= 0.0 ? 2.0 : SPARKS;
+        if (SUBTLE) count = min(count, 2.0);  // subtle: two short sparks
         for (float k = 0.0; k < SPARKS; k += 1.0) {
             if (k >= count) break;
             if (hash11(tick * 7.0 + k * 1.3) > 0.75 * sparkStrength + 0.1) continue;
             float ang = hash11(tick * 3.1 + k * 9.7) * 6.2832;
             vec2 dir = vec2(cos(ang), sin(ang));
             vec2 start = center + dir * min(hs.x / max(abs(dir.x), 1e-3), hs.y / max(abs(dir.y), 1e-3));
-            vec2 end = start + dir * cellH * (0.35 + 0.5 * hash11(tick + k * 4.1));
+            vec2 end = start + dir * cellH * (0.35 + 0.5 * hash11(tick + k * 4.1)) * (SUBTLE ? 0.55 : 1.0);
             float sd = boltDist(p, start, end, 0.25 * distance(start, end), tick + k * 17.0, 4.0);
             light += boltLight(sd, BOLT_WIDTH * cellH * 0.5, glowPx * 0.4, sparkStrength);
         }
@@ -794,10 +837,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
+    vec3 under = fragColor.rgb;  // the screen before the moments (the subtle version mixes back to it)
     effects(fragColor, fragCoord);
+    if (SUBTLE) fragColor.rgb = mix(under, fragColor.rgb, 0.55);
     // The line color stays when the window loses focus; the moving looks don't.
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCursorVisible != 0 && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (iCursorVisible == 0) return;
-    if (iFocus != 0 && CURSOR_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(cursorLook(fragCoord, fragColor.rgb), vec3(1.0));
-    if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0));
+    if (iFocus != 0 && CURSOR_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(cursorLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.45) : lit; }
+    if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.6) : lit; }
 }
