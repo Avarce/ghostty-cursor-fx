@@ -24,15 +24,18 @@ def run(url, profile):
     return json.loads(m.group(1)) if m else {"failed": "no result: " + out[-300:]}
 
 
-def verdict(r):
+def verdict(r, name):
     if "failed" in r:
         return [r["failed"][:200]]
-    cases = {k: v for k, v in r.items() if k not in ("underline", "hash")}
+    cases = {k: v for k, v in r.items() if k not in ("underline", "hash", "shell")}
     bad = [f"{k}: not found" for k, v in cases.items() if not v["found"]]
     bad += [f"{k}: Enter did not light the lines ({v['lit']}px)" for k, v in cases.items() if v["lit"] < LIT]
     bad += [f"{k}: spills out of the pane ({v['spill']}px)" for k, v in cases.items() if v["spill"] > 40]
     if r["underline"]["tinted"] > 40:
         bad.append(f"underline taken for a box line ({r['underline']['tinted']}px)")
+    # cyber draws no line on Enter: its rain falls from the line, into the rows below it.
+    if r["shell"]["ruleLit"] < LIT and "cyber" not in name:
+        bad.append(f"shell prompt: Enter did not light its line ({r['shell']})")
     return bad
 
 
@@ -69,11 +72,13 @@ def main():
                 settings = {"CURSOR_EFFECT": "false", "LINE_TINT": "true", **json.loads(args.set or "{}")}
                 url += "&set=" + urllib.parse.quote(json.dumps(settings))
                 r = run(url, pathlib.Path(tmp) / "profile")
-                bad = verdict(r)
+                bad = verdict(r, f.stem)
                 failed += bool(bad)
-                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k not in ("underline", "hash")) if "failed" not in r else ""
+                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k not in ("underline", "hash", "shell")) if "failed" not in r else ""
                 if args.hashes and "hash" in r:
                     nums = f"hash={r['hash']} dark={r['window']['darkShare']} {nums}"
+                if "shell" in r:
+                    nums += f" shell:{r['shell']['ruleLit']}/text {r['shell']['textLit']}/under {r['shell']['underLit']}"
                 print(f"{'FAIL' if bad else 'ok  '} {f.stem:20} {nums}")
                 for b in bad:
                     print(f"       {b}")
