@@ -43,6 +43,8 @@ def main():
     a.add_argument("--only", default="", help="only shaders whose name contains this")
     a.add_argument("--bg", default="2a2a2a", help="the theme's background, as hex")
     a.add_argument("--fg", default="c6bba3", help="the theme's foreground, as hex")
+    a.add_argument("--opacity", default="1", help="background-opacity of the window")
+    a.add_argument("--linear", default="1", help="0: an sRGB screen texture, as on macOS")
     a.add_argument("--hashes", action="store_true", help="also print a hash of each shader's frames")
     args = a.parse_args()
     if not CHROME:
@@ -61,7 +63,7 @@ def main():
             failed = 0
             for f in sorted(p for p in shaders.glob("*.glsl") if args.only in p.name):
                 color = "9fd0fe"
-                url = f"http://127.0.0.1:{port}/repo/test/cjk.html?shader=/shaders/{f.name}&color={color}&bg={args.bg}&fg={args.fg}&run=detection.js"
+                url = f"http://127.0.0.1:{port}/repo/test/cjk.html?shader=/shaders/{f.name}&color={color}&bg={args.bg}&fg={args.fg}&opacity={args.opacity}&linear={args.linear}&run=detection.js"
                 # The cursor's own look is not under test, and its glow reaches the rows around it.
                 # LINE_TINT shows a line was found without a signal; teleport ships with it off.
                 settings = {"CURSOR_EFFECT": "false", "LINE_TINT": "true", **json.loads(args.set or "{}")}

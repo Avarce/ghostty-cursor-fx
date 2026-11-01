@@ -210,7 +210,8 @@ open `http://localhost:8000/test/index.html?shader=../shaders/lightning-cursor.g
 `tests2.js` and `tests3.js` hold the checks used while building the effects.
 `test/run_detection.py` runs `test/detection.js` for every shader in headless Chrome: the input
 box in a whole window, next to a sidebar and in splits, and an underline that must not count.
-`--bg eff1f5 --fg 5c5f77` runs them on a light theme, `--hashes` prints a hash of the frames to compare two versions.
+`--bg eff1f5 --fg 5c5f77` runs them on a light theme, `--opacity 0.85 --linear 0` in a translucent window as on macOS,
+`--hashes` prints a hash of the frames to compare two versions.
 `sync-from-ghostty.sh` copies your live, tuned files back into this folder.
 `promo/` renders the promo video and the pictures in this README from the same shaders
 (see `promo/README.md`).

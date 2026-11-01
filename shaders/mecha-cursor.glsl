@@ -100,6 +100,9 @@ vec3 themeFlip(vec3 c) {
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
     vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
+    // A translucent window (background-opacity): Ghostty hands the background over premultiplied,
+    // so it would never match iBackgroundColor. mainImage multiplies again at the end.
+    if (c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
     if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
 }
@@ -810,9 +813,11 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (lightTheme()) {
-        vec3 corner = texture(iChannel0, vec2(0.001)).rgb, bg = 1.0 - iBackgroundColor;
+        vec4 t = texture(iChannel0, vec2(0.001));
+        vec3 corner = t.rgb / max(t.a, 0.01), bg = 1.0 - iBackgroundColor;
         screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
     }
     effectImage(fragColor, fragCoord);
     if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
+    if (fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }

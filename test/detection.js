@@ -14,7 +14,7 @@
   };
   const screenPixels = opts => {
     drawTerm(opts);
-    const c = term.getContext('2d').getImageData(0, 0, W, H).data, px = new Uint8Array(W * H * 4);
+    const c = screenData(), px = new Uint8Array(W * H * 4);
     for (let y = 0; y < H; y++) px.set(c.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
     return px;
   };
