@@ -60,6 +60,8 @@ redrawing the screen never set anything off.
 - **Splits and the done effect**: done starts at the window's edges, not the pane's, so in a
   split it reaches the pane a moment later (mecha's clash stays at the window's middle). In a
   plain shell there is no box line to measure, so Enter under the sent line spans the window.
+  A prompt that draws a line of its own after its text (starship's `$fill`, at least 12 cells long, one or
+  two rows above the cursor) gets the effect on that line instead; only neon keeps it off the prompt's text.
 - **A prompt that wraps over several rows**: aurora, cyber, embers, fireworks, hologram, mecha and
   teleport play their Enter effect along the bottom box line only (glitch, katana,
   lightning, neon, phosphor and shockwave find both lines).

@@ -254,6 +254,52 @@ float sentRowY(vec4 cur, float cellW, vec2 res) {
     return cur.x <= 1.5 * cellW ? cur.y + 0.5 * cur.w : cur.y - 0.5 * cur.w;
 }
 
+// A shell prompt can draw a line of its own after its text on the first row (starship's $fill). It
+// misses the cursor's column, so it isn't a box line: one color for at least SHELL_LINE_CELLS cells
+// and background four pixels above and below.
+const float SHELL_LINE_CELLS = 12.0;
+
+bool onShellLine(float x, float y, float cellW, vec2 res) {
+    vec3 ink = screenAt(vec2(x, y) / res).rgb;
+    if (colorDist(ink, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+            || colorDist(screenAt(vec2(x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) return false;
+    float cells = 0.0;
+    for (int side = 0; side < 2; side++) {
+        float dir = side == 0 ? 1.0 : -1.0;
+        for (int i = 1; i <= 12; i++) {
+            float at = x + dir * float(i) * cellW;
+            if (at < 0.0 || at > res.x || distance(screenAt(vec2(at, y) / res).rgb, ink) > 0.03) break;
+            cells += 1.0;
+        }
+    }
+    return cells >= SHELL_LINE_CELLS;
+}
+
+// That line's height, or -1. Right of the cursor, in the row above it (the new prompt is already
+// there, the cursor on its second row) or two rows above (the cursor still under the sent line).
+// Rows can be up to 14% taller than the cursor (adjust-cell-height). A bounded search, it runs per
+// pixel while the signal is on.
+float shellLineY(vec4 cur, float cellW, vec2 res) {
+    float midY = cur.y - 0.5 * cur.w, x0 = cur.x + 0.5 * cellW;
+    float stepX = max(8.0 * cellW, (res.x - x0) / 14.0), stepY = max(1.0, floor(cur.w / 30.0));
+    for (int k = 1; k <= 2; k++) {
+        for (float y = midY + float(k) * cur.w - 2.0; y <= midY + float(k) * 1.14 * cur.w + 2.0; y += stepY) {
+            if (y > res.y) break;
+            for (float x = x0; x < res.x; x += stepX)
+                if (onShellLine(x, y, cellW, res)) return y;
+        }
+    }
+    return -1.0;
+}
+
+// With no box at all (a shell), where the Enter line goes: the prompt's own line, else just under
+// the row that was sent.
+float sentLineY(vec4 cur, float cellW, vec2 res) {
+    float y = shellLineY(cur, cellW, res);
+    return y >= 0.0 ? y : sentRowY(cur, cellW, res) - 0.5 * cur.w + 2.0;
+}
+
 // Claude Code draws its input box with a thin grey line across the whole width
 // above and below the typed text. Looks for the nearest such line within
 // `reach` of the pixel: ink at three points along the width with background a
@@ -291,7 +337,7 @@ vec3 enterEffect(vec2 p, vec4 cur, vec2 center, float cellW, float cellH, vec2 r
     if (p.y - center.y > 4.0 * cellH + reach || center.y - p.y > 1.6 * cellH + reach) return col;
     float lineY = boxLineY(p, center, cur, res, reach);
     if (lineY < 0.0) {
-        float under = sentRowY(cur, cellW, res) - 0.5 * cur.w + 2.0;
+        float under = sentLineY(cur, cellW, res);
         if (abs(p.y - under) >= reach
                 || boxLineY(center + vec2(0.0, 0.5 * cellH), center, cur, res, 0.9 * cellH) >= 0.0
                 || boxLineY(center - vec2(0.0, 0.5 * cellH), center, cur, res, 0.9 * cellH) >= 0.0) return col;
