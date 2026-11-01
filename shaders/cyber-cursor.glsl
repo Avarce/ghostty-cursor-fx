@@ -1257,7 +1257,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // The moving effects play only in the focused window; the colors (your text, the box
     // lines, the prompt mark) stay when you switch to another window or Space.
     if (iFocus != 0 && iCursorVisible != 0) paneEffects(fragColor, fragCoord);
-    if (TEXT_COLOR && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = clamp(textTint(fragCoord, fragColor.rgb, res), 0.0, 1.0);
+    if (TEXT_COLOR && iCurrentCursorStyle == CURSORSTYLE_BLOCK) {
+        vec3 tinted = clamp(textTint(fragCoord, fragColor.rgb, res), 0.0, 1.0);
+        if (tinted != fragColor.rgb && inBoxPane(fragCoord.x, res)) fragColor.rgb = tinted;  // not another pane's text
+    }
     if (iCursorVisible == 0 || iCurrentCursorStyle != CURSORSTYLE_BLOCK) return;
     if (LINE_EFFECT || (LINE_TINT && LINE_COLOR > 0.0)) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (CURSOR_EFFECT && iFocus != 0) fragColor.rgb = min(cursorLook(fragCoord, fragColor.rgb, res, sRGBToLinear(RAIN_COLOR)), vec3(1.0));
