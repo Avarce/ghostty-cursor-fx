@@ -68,7 +68,8 @@ redrawing the screen never set anything off.
 - **Other programs that set the cursor color** themselves (OSC 12) with an odd blue or green value
   can set off an Enter or done effect; the signals use those lowest bits.
 - **tmux**: the Enter and done signals rely on the cursor color reaching Ghostty; inside tmux that
-  depends on your tmux setup and is untested.
+  depends on your tmux setup and is untested. herdr keeps a pane's cursor color to itself, so in a
+  herdr pane `cursor-fx signal` writes to the herdr client's terminal instead.
 - **bash and fish**: only the zsh hook ships; the README's snippets for other shells are untested.
 - **Battery**: while any animated effect is on, Ghostty redraws the focused window continuously.
   `cursor-fx idle off` makes the screen calmer; `cursor-fx off` is the only real saver.
