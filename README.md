@@ -65,9 +65,9 @@ redrawing the screen never set anything off.
   can set off an Enter or done effect; the signals use those lowest bits.
 - **tmux**: the Enter and done signals rely on the cursor color reaching Ghostty; inside tmux that
   depends on your tmux setup and is untested.
-- **pi** needs "Show hardware cursor" on. Without it the cursor is hidden: no cursor look,
-  typing or done effects, and Enter plays where the cursor was last seen. The pi
-  extension is untested on a real setup so far.
+- **pi** needs "Show hardware cursor" on. Without it Ghostty sees no cursor: no cursor look,
+  typing or done effects, and Enter plays where the cursor was last seen. The pi signals are
+  checked with pi 1.4.0; the effects in pi are not yet checked in Ghostty.
 - **bash and fish**: only the zsh hook ships; the README's snippets for other shells are untested.
 - **Battery**: while any animated effect is on, Ghostty redraws the focused window continuously.
   `cursor-fx idle off` makes the screen calmer; `cursor-fx off` is the only real saver.
@@ -114,12 +114,9 @@ a `UserPromptSubmit` hook for Enter and a `Stop` hook (Claude finished answering
 for done.
 
 **pi** — copy `hooks/pi-extension.ts` to `~/.pi/agent/extensions/cursor-fx.ts`
-(pi loads it at start, or after `/reload`): Enter when you send a prompt, done
-when pi has finished and won't continue on its own. Also turn on **Show hardware
-cursor** in pi's `/settings` (`"showHardwareCursor": true` in
-`~/.pi/agent/settings.json`): pi hides the terminal cursor by default and draws
-its own, and the effects follow the terminal cursor. pi's input box has the same
-full-width lines as Claude Code's, so Enter and done play along them.
+(loaded at start or on `/reload`): Enter when you send a prompt, done when pi has
+finished and won't continue on its own. Also turn on **Show hardware cursor** in
+pi's `/settings`: pi hides the terminal cursor by default, and the effects follow it.
 
 **zsh** — add `hooks/zsh-hook.zsh` to your `~/.zshrc`: Enter before every command,
 done after any command that took more than 5 seconds. (bash/fish: call
