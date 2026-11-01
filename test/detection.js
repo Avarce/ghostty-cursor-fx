@@ -37,19 +37,29 @@
     // LINE_TINT colors a box line it found, without any signal.
     const tint = changed(plain, idle, [5, 7], screen.pane);
     // The Enter effect: the same frame with and without the signal, at a few moments.
-    let lit = 0, spill = 0;
+    let lit = 0, spill = 0, darker = 0, lighter = 0;
     for (const since of [0.12, 0.25, 0.4, 0.6]) {
       const off = render(T0 + since, T0, { screen });
       const on = render(T0 + since, T0, { screen, signal: 'enter' });
       const d = changed(off, on, [4, 5, 7, 8], screen.pane);
       lit = Math.max(lit, d.inside); spill = Math.max(spill, d.outside);
+      for (let i = 0; i < on.length; i += 4) {
+        const l = on[i] + on[i + 1] + on[i + 2] - off[i] - off[i + 1] - off[i + 2];
+        if (l < -6) darker++; else if (l > 6) lighter++;
+      }
     }
-    out[name] = { found: tint.inside > 200, lit, spill };
+    out[name] = { found: tint.inside > 200, lit, spill, darkShare: +(darker / Math.max(1, darker + lighter)).toFixed(2) };
   }
   // An underline of ten cells right above the cursor is not a box line; the full one below is.
   // Measured away from the cursor, whose glow reaches the row above it.
   const u = { box: [7], short: { row: 5, from: 0, to: 10 }, cur: { row: 6, col: 2 } };
   const idleU = render(T0 + 50, T0, { screen: u });
   out.underline = { tinted: changed(screenPixels(u), idleU, [5], [5, 10]).inside };
-  return out;
+  // A hash of a few frames, to compare a shader's output between two versions of it.
+  let hash = 2166136261;
+  for (const [t, signal] of [[50, null], [0.25, 'enter'], [0.25, 'done']]) {
+    const px = render(T0 + t, T0, { screen: screens.window, signal });
+    for (let i = 0; i < px.length; i += 16) hash = Math.imul(hash ^ px[i] ^ (px[i + 1] << 8) ^ (px[i + 2] << 16), 16777619);
+  }
+  return { ...out, hash: hash >>> 0 };
 })();

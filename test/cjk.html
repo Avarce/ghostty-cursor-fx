@@ -7,11 +7,11 @@
 // Like index.html, but the screen is drawn cell by cell like a terminal: CJK characters take two
 // cells, centered; rows can be colored; the input box lines (4 px, like Ghostty's), the sent-prompt
 // bars and the cursor are placed freely. Open as cjk.html?shader=../shaders/<file>&set={"NAME":"value"}
-// (set overrides setting lines). window.render(time, change, { screen, prev, linear, focus }).
+// (set overrides setting lines; bg= and fg= the theme's colors). window.render(time, change, { screen, prev, linear, focus }).
 const W = 1200, H = 420, CH = 44, PADX = 16, PADY = 12;
 const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
-const BG = '#2a2a2a', FG = '#c6bba3', CUR_TEXT = '#2a2a2a';
 const q = new URLSearchParams(location.search);
+const BG = '#' + (q.get('bg') || '2a2a2a'), FG = '#' + (q.get('fg') || 'c6bba3'), CUR_TEXT = BG;
 const CUR = '#' + (q.get('color') || '50e080');
 const term = document.createElement('canvas'); term.width = W; term.height = H;
 const tc = term.getContext('2d');

@@ -77,8 +77,10 @@ redrawing the screen never set anything off.
 
 - Ghostty 1.4 or newer on **macOS or Linux** (Ghostty has no Windows build).
 - Python 3.8 or newer (for `cursor-fx`; no packages needed; the one that comes with macOS works).
-- A dark theme: the effects add light, so on a light background they are faint. Colors sit in the
-  7–9.5:1 contrast range on a dark grey background.
+- Dark or light theme. On a light background the effects draw ink instead of light, chosen from
+  the background color on its own. Colors sit in the 7–9.5:1 contrast range on a dark grey
+  background. Colors built into an effect turn to their opposite on a light theme (fireworks'
+  gold glows blue, mecha's blue blades orange); the ones from the cursor color stay.
 - A block cursor (Ghostty's default). With a bar or underline cursor (for example vim's insert mode)
   the cursor, prompt-mark and box-line looks stay off; the moves and Enter effects still play.
 
@@ -208,6 +210,7 @@ open `http://localhost:8000/test/index.html?shader=../shaders/lightning-cursor.g
 `tests2.js` and `tests3.js` hold the checks used while building the effects.
 `test/run_detection.py` runs `test/detection.js` for every shader in headless Chrome: the input
 box in a whole window, next to a sidebar and in splits, and an underline that must not count.
+`--bg eff1f5 --fg 5c5f77` runs them on a light theme, `--hashes` prints a hash of the frames to compare two versions.
 `sync-from-ghostty.sh` copies your live, tuned files back into this folder.
 `promo/` renders the promo video and the pictures in this README from the same shaders
 (see `promo/README.md`).

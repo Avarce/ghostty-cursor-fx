@@ -27,9 +27,10 @@ def run(url, profile):
 def verdict(r):
     if "failed" in r:
         return [r["failed"][:200]]
-    bad = [f"{k}: not found" for k, v in r.items() if k != "underline" and not v["found"]]
-    bad += [f"{k}: Enter did not light the lines ({v['lit']}px)" for k, v in r.items() if k != "underline" and v["lit"] < LIT]
-    bad += [f"{k}: spills out of the pane ({v['spill']}px)" for k, v in r.items() if k != "underline" and v["spill"] > 40]
+    cases = {k: v for k, v in r.items() if k not in ("underline", "hash")}
+    bad = [f"{k}: not found" for k, v in cases.items() if not v["found"]]
+    bad += [f"{k}: Enter did not light the lines ({v['lit']}px)" for k, v in cases.items() if v["lit"] < LIT]
+    bad += [f"{k}: spills out of the pane ({v['spill']}px)" for k, v in cases.items() if v["spill"] > 40]
     if r["underline"]["tinted"] > 40:
         bad.append(f"underline taken for a box line ({r['underline']['tinted']}px)")
     return bad
@@ -40,6 +41,9 @@ def main():
     a.add_argument("--shaders", default=None)
     a.add_argument("--set", default="", help='settings to override, as JSON: {"LINE_TINT":"false"}')
     a.add_argument("--only", default="", help="only shaders whose name contains this")
+    a.add_argument("--bg", default="2a2a2a", help="the theme's background, as hex")
+    a.add_argument("--fg", default="c6bba3", help="the theme's foreground, as hex")
+    a.add_argument("--hashes", action="store_true", help="also print a hash of each shader's frames")
     args = a.parse_args()
     if not CHROME:
         sys.exit("no Chrome found")
@@ -57,7 +61,7 @@ def main():
             failed = 0
             for f in sorted(p for p in shaders.glob("*.glsl") if args.only in p.name):
                 color = "9fd0fe"
-                url = f"http://127.0.0.1:{port}/repo/test/cjk.html?shader=/shaders/{f.name}&color={color}&run=detection.js"
+                url = f"http://127.0.0.1:{port}/repo/test/cjk.html?shader=/shaders/{f.name}&color={color}&bg={args.bg}&fg={args.fg}&run=detection.js"
                 # The cursor's own look is not under test, and its glow reaches the rows around it.
                 # LINE_TINT shows a line was found without a signal; teleport ships with it off.
                 settings = {"CURSOR_EFFECT": "false", "LINE_TINT": "true", **json.loads(args.set or "{}")}
@@ -65,7 +69,9 @@ def main():
                 r = run(url, pathlib.Path(tmp) / "profile")
                 bad = verdict(r)
                 failed += bool(bad)
-                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k != "underline") if "failed" not in r else ""
+                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k not in ("underline", "hash")) if "failed" not in r else ""
+                if args.hashes and "hash" in r:
+                    nums = f"hash={r['hash']} dark={r['window']['darkShare']} {nums}"
                 print(f"{'FAIL' if bad else 'ok  '} {f.stem:20} {nums}")
                 for b in bad:
                     print(f"       {b}")

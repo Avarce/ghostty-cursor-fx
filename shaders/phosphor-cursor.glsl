@@ -63,9 +63,35 @@ const float JUMP_SETTLE    = 0.12;  // the same after a jump (gives the Enter si
 // so with Y_DOWN (top of the file) mainImage turns its pixel and the cursors
 // over and screenAt() turns every read of the screen back.
 
+// Light themes: the effects add light, which a light background can't show. So on a light
+// background everything below works on an inverted picture (screen and colors), and mainImage
+// inverts the result back: light becomes ink in the same color, and a dark theme stays untouched.
+bool lightTheme() {
+    return dot(iBackgroundColor, vec3(0.2126, 0.7152, 0.0722)) > 0.5;
+}
+
+// Whether the screen texture is linear (see colorDist()), set once per pixel by mainImage. The
+// inversion has to happen in sRGB, like the one of the colors, or the two would no longer match.
+bool screenLinear = false;
+
+vec3 themeFlip(vec3 c) {
+    if (!screenLinear) return 1.0 - c;
+    c = clamp(c, 0.0, 1.0);
+    c = 1.0 - mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+#define iBackgroundColor (lightTheme() ? 1.0 - iBackgroundColor : iBackgroundColor)
+#define iForegroundColor (lightTheme() ? 1.0 - iForegroundColor : iForegroundColor)
+#define iCursorText (lightTheme() ? 1.0 - iCursorText : iCursorText)
+#define iCurrentCursorColor (lightTheme() ? vec4(1.0 - iCurrentCursorColor.rgb, iCurrentCursorColor.a) : iCurrentCursorColor)
+#define iPreviousCursorColor (lightTheme() ? vec4(1.0 - iPreviousCursorColor.rgb, iPreviousCursorColor.a) : iPreviousCursorColor)
+
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
-    return texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
+    vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
+    if (lightTheme()) c.rgb = themeFlip(c.rgb);
+    return c;
 }
 
 // A cursor rectangle with .xy its top-left corner in y-up pixels. Ghostty gives
@@ -154,6 +180,7 @@ float sdBox(vec2 p, vec2 b) {
 // it was on in a way that means the same Enter (Claude Code clearing its input box
 // after the signal arrived).
 bool oddByte(float v) {
+    if (lightTheme()) v = 1.0 - v;  // the signal's bit is in the real color
     return mod(floor(v * 255.0 + 0.5), 2.0) > 0.5;
 }
 
@@ -627,7 +654,7 @@ void paneEffects(inout vec4 fragColor, vec2 fragCoord) {
     if (fragColor.rgb != before && !inBoxPane(fragCoord.x, iResolution.xy)) fragColor.rgb = before;
 }
 
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+void effectImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
@@ -636,4 +663,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCursorVisible != 0 && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (iCursorVisible == 0) return;
     if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0));
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    if (lightTheme()) {
+        vec3 corner = texture(iChannel0, vec2(0.001)).rgb, bg = 1.0 - iBackgroundColor;
+        screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
+    }
+    effectImage(fragColor, fragCoord);
+    if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
 }
