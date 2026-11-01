@@ -21,15 +21,26 @@ const wide = ch => /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch
 // rows: [{ text, color }] or strings; box: [topRow, bottomRow] draws full-width lines in those rows;
 // bar: row(s) on a background (Claude Code's grey sent-prompt bar unless given); cur: { row, col, wide, hidden }; curH: the cursor's
 // height, centered in its row (Ghostty's rows are taller than the cursor with adjust-cell-height).
+// pane: [firstCol, endCol] the columns the box lines span, with other text left and right of it (a sidebar,
+// a split); short: { row, from, to } a short line in a row (an underline).
 let CURH = CH;
-function drawTerm({ rows = [], box = null, cur = { row: 6, col: 2 }, bar = null, lineW = 4, curH = CH } = {}) {
+function drawTerm({ rows = [], box = null, cur = { row: 6, col: 2 }, bar = null, lineW = 4, curH = CH, pane = null, short = null } = {}) {
   CURH = curH;
   tc.fillStyle = BG; tc.fillRect(0, 0, W, H);
   tc.textBaseline = 'top';
   for (const b of [].concat(bar ?? [])) {  // a row number (Claude Code's #373737), or { row, color }
     tc.fillStyle = b.color || '#373737'; tc.fillRect(PADX, PADY + (b.row ?? b) * CH, W - 2 * PADX, CH);
   }
-  if (box) { tc.fillStyle = '#6a6a6a'; for (const r of box) tc.fillRect(PADX, PADY + r * CH + CH / 2 - lineW / 2, W - 2 * PADX, lineW); }
+  const boxL = pane ? PADX + pane[0] * CW : PADX, boxR = pane ? PADX + pane[1] * CW : W - PADX;
+  if (box) { tc.fillStyle = '#6a6a6a'; for (const r of box) tc.fillRect(boxL, PADY + r * CH + CH / 2 - lineW / 2, boxR - boxL, lineW); }
+  if (short) { tc.fillStyle = '#6a6a6a'; tc.fillRect(PADX + short.from * CW, PADY + short.row * CH + CH / 2 - lineW / 2, (short.to - short.from) * CW, lineW); }
+  if (pane) {
+    tc.fillStyle = FG; tc.font = '30px Menlo, monospace';
+    for (let r = 0; r < 9; r++) {
+      if (pane[0] > 2) tc.fillText('agent'.slice(0, pane[0] - 2), PADX, PADY + r * CH + 6);
+      if (boxR < W - PADX - 3 * CW) tc.fillText('other', boxR + CW, PADY + r * CH + 6);
+    }
+  }
   rows.forEach((row, r) => {
     const { text, color = FG } = typeof row === 'string' ? { text: row } : row;
     let col = 0;
@@ -102,14 +113,17 @@ in vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }`));
   gl.uniform3fv(u('iPalette'), pal);
   gl.uniform1i(u('iChannel0'), 0);
   // screen: drawTerm options; prev: { row, col, wide } of the previous cursor.
-  window.render = (time, change, { screen = {}, prev = null, linear = 1, focus = 1 } = {}) => {
+  window.render = (time, change, { screen = {}, prev = null, linear = 1, focus = 1, signal = null } = {}) => {
     const cur = screen.cur || { row: 6, col: 2 };
     drawTerm(screen);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, term);
     const p = prev || cur;
     gl.uniform4f(u('iCurrentCursor'), ...rect(cur.row, cur.col, cur.wide ? 2 : 1));
     gl.uniform4f(u('iPreviousCursor'), ...rect(p.row, p.col, p.wide ? 2 : 1));
-    gl.uniform4f(u('iCurrentCursorColor'), ...hex(CUR), 1);
+    const c = hex(CUR);  // the signals: the lowest bit of the blue (Enter) or green (done) value
+    if (signal === 'enter') c[2] = (Math.round(c[2] * 255) | 1) / 255;
+    if (signal === 'done') c[1] = (Math.round(c[1] * 255) | 1) / 255;
+    gl.uniform4f(u('iCurrentCursorColor'), ...c, 1);
     gl.uniform4f(u('iPreviousCursorColor'), ...hex(CUR), 1);
     gl.uniform1i(u('iCursorVisible'), 1); gl.uniform1i(u('iFocus'), focus);
     gl.uniform1i(u('uLinear'), linear);
@@ -156,7 +170,12 @@ in vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }`));
     cx.drawImage(gl.canvas, x, yTop, w, h, 0, 0, w * scale, h * scale);
     return c.toDataURL('image/png');
   };
-  window.CW = CW;
+  window.CW = CW; window.drawTerm = drawTerm; window.term = term; window.W = W; window.H = H; window.PADX = PADX; window.PADY = PADY; window.CH = CH;
   log(`compiled OK; cell ${CW}x${CH}px`);
 }).catch(e => { log('ERROR: ' + e.message); window.failed = e.message; });
+// run=detection.js: run a check file after compiling and write its result into the page.
+if (q.get('run')) window.ready.then(async () => {
+  const out = window.failed ? { failed: window.failed } : await (0, eval)(await (await fetch(q.get('run'), { cache: 'no-store' })).text());
+  log('RESULT ' + JSON.stringify(out));
+}).catch(e => log('RESULT ' + JSON.stringify({ failed: String(e) })));
 </script>

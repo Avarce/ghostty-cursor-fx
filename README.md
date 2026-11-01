@@ -48,14 +48,18 @@ redrawing the screen never set anything off.
 ## Known limitations
 
 - **The input box is found by its look.** A shader can't ask Claude Code where its input box is,
-  so each effect looks for a thin line across the window (ink at 5, 45, 66, 88 and 95 % of the
-  width, background 4 px above and below) up to a few rows above and below the cursor. Claude
-  Code draws it in grey (rgb 136 or 138), or in your palette's white with its ANSI themes. If
-  that line is within about 3 % of your background color, or a Claude Code update redraws the
-  box (lines 8 px or thicker, a sidebar, no lines), Enter plays just under the sent line
-  instead. A full-width horizontal rule from another program right above or below the cursor
-  lights up like a box line. Checked in the test harness with Claude Code's line grey on dark
-  grey, black, Dracula and Solarized Dark backgrounds.
+  so each effect looks for a thin line through the cursor's column (one color for at least 24
+  cells around it, background 4 px above and below) up to a few rows above and below the cursor.
+  That also finds the box next to a sidebar or in a split (herdr, tmux), and effects stop where
+  the line ends. Claude Code draws it in grey (rgb 136 or 138), or in your palette's white with
+  its ANSI themes. If that line is within about 3 % of your background color, or a Claude Code
+  update redraws the box (lines 8 px or thicker, no lines, a pane under 24 cells wide), Enter
+  plays just under the sent line instead. A long horizontal rule from another program right
+  above or below the cursor lights up like a box line. Checked in the test harness with Claude
+  Code's line grey on dark grey, black, Dracula and Solarized Dark backgrounds.
+- **Splits and the done effect**: done starts at the window's edges, not the pane's, so in a
+  split it reaches the pane a moment later (mecha's clash stays at the window's middle). In a
+  plain shell there is no box line to measure, so Enter under the sent line spans the window.
 - **A prompt that wraps over several rows**: aurora, cyber, embers, fireworks, hologram, mecha and
   teleport play their Enter effect along the bottom box line only (glitch, katana,
   lightning, neon, phosphor and shockwave find both lines).
@@ -202,6 +206,8 @@ existing shader, read the screen through `screenAt()` and the cursors through
 screen with Ghostty's uniforms: run `python3 -m http.server` in this folder and
 open `http://localhost:8000/test/index.html?shader=../shaders/lightning-cursor.glsl&color=9fd0fe`; `tests.js`,
 `tests2.js` and `tests3.js` hold the checks used while building the effects.
+`test/run_detection.py` runs `test/detection.js` for every shader in headless Chrome: the input
+box in a whole window, next to a sidebar and in splits, and an underline that must not count.
 `sync-from-ghostty.sh` copies your live, tuned files back into this folder.
 `promo/` renders the promo video and the pictures in this README from the same shaders
 (see `promo/README.md`).

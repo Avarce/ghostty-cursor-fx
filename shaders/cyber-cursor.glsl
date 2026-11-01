@@ -137,6 +137,35 @@ float colorDist(vec3 s, vec3 c) {
     return min(distance(s, c), distance(s, sRGBToLinear(c)));
 }
 
+// The input box lines run across the pane Claude Code is in, not across the window: a sidebar
+// or a split (herdr, tmux) can take the rest. So a box line is found from the cursor's column:
+// it passes through that column, is one color for at least BOX_LINE_CELLS cells around it (a
+// zsh underline or a row of text never is) and has background four pixels above and below.
+const float BOX_LINE_CELLS = 24.0;
+
+float boxColumnX() {
+    vec4 c = upCursor(iCurrentCursor);
+    return c.x + 0.5 * cellWOf(c);
+}
+
+bool onBoxLine(float y, vec2 res) {
+    float w = cellWOf(upCursor(iCurrentCursor)), x = boxColumnX();
+    vec3 ink = screenAt(vec2(x, y) / res).rgb;
+    if (colorDist(ink, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+            || colorDist(screenAt(vec2(x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) return false;
+    float cells = 0.0;
+    for (int side = 0; side < 2; side++) {
+        float dir = side == 0 ? 1.0 : -1.0;
+        for (int i = 1; i <= 12; i++) {
+            float at = x + dir * float(i) * 2.0 * w;
+            if (at < 0.0 || at > res.x || distance(screenAt(vec2(at, y) / res).rgb, ink) > 0.03) break;
+            cells += 2.0;
+        }
+    }
+    return cells >= BOX_LINE_CELLS;
+}
+
 // Is the cursor drawn in this frame, or blinked off? Checks three points along
 // its left edge: each counts if it looks more like the cursor color than like
 // the background or the text color. Two of three must match.
@@ -209,22 +238,13 @@ float sentRowY(vec4 cur, float cellW, vec2 res) {
 // and 1.6 rows below it (the status lines never count). Returns its height, or -1.
 float boxLineY(vec2 p, vec2 center, vec4 cur, vec2 res, float reach) {
     float stepPx = max(1.0, reach / 40.0);
-    vec3 xs = vec3(0.45, 0.66, 0.88) * res.x;
     for (int i = 0; i < 80; i++) {
         float dy = floor(float(i) * 0.5) * stepPx * (mod(float(i), 2.0) < 0.5 ? 1.0 : -1.0);
         if (abs(dy) > reach) break;
         float y = p.y + dy;
         if (y < 0.0 || y > res.y || y - center.y > 4.0 * cur.w || center.y - y > 1.6 * cur.w
                 || (y > cur.y - cur.w && y < cur.y)) continue;
-        if (colorDist(screenAt(vec2(xs.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.y, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.z, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        // Claude Code's box lines run across the whole window; a shorter line (zsh's
-        // underline under a path, a rule in some output) is not one.
-        if (colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        if (colorDist(screenAt(vec2(xs.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
-                || colorDist(screenAt(vec2(xs.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        if (!onBoxLine(y, res)) continue;
         return y;
     }
     return -1.0;
@@ -608,12 +628,12 @@ float clLineNear(float y0, float reach, vec2 res);  // further down, with the bo
 vec2 clMarkAbove(vec4 cur, vec2 res) {
     float w = cellWOf(cur), h = cur.w;
     if (w < 2.0) return vec2(-1.0);
-    // The input box's top line: the first line across the window above the cursor's row.
+    // The input box's top line: the first box line above the cursor's row.
     float stepY = max(1.0, floor(h / 16.0)), lineY = -1.0;
     for (int i = 0; i < 400; i++) {
         float y = cur.y + 1.0 + float(i) * stepY;
         if (y > cur.y + 10.0 * h || y > res.y) break;
-        if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (colorDist(screenAt(vec2(boxColumnX(), y) / res).rgb, iBackgroundColor) < 0.03) continue;
         lineY = clLineNear(y, 1.0, res);
         if (lineY >= 0.0) break;
     }
@@ -683,16 +703,14 @@ vec3 promptLook(vec2 p, vec3 col) {
         // A prompt that wraps, the cursor on a later row: the mark on the prompt's first row.
         if (p.y < cur.y || p.y > cur.y + 10.5 * h || p.x > mod(cur.x, w) + 7.0 * w) return col;
         if (clMarkLeft(cur, res) >= 0.0) return col;  // the cursor's own row starts with the mark (or with text)
-        // Only the box's first row (a line across the window at most a row and a half above) can hold the mark:
+        // Only the box's first row (a box line at most a row and a half above) can hold the mark:
         // cheap, before the search.
         bool under = false;
         float stepY = max(1.0, floor(h / 16.0));
         for (int i = 0; i < 100; i++) {
             float y = p.y + float(i) * stepY;
             if (y > p.y + 2.2 * h || y > res.y) break;
-            if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) > 0.03
-                    && colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) > 0.03
-                    && colorDist(screenAt(vec2(0.5 * res.x, y) / res).rgb, iBackgroundColor) > 0.03) { under = true; break; }
+            if (onBoxLine(y, res)) { under = true; break; }
         }
         if (!under) return col;
         m = clMarkAbove(cur, res);
@@ -717,24 +735,15 @@ vec3 promptLook(vec2 p, vec3 col) {
 
 // --- The input box lines' look (LINE_EFFECT) ---
 
-// The box line nearest to height y0, within `reach`: ink at three points across
-// the window and background four pixels above and below it (like boxLineY()).
+// The box line nearest to height y0, within `reach`: one color through the cursor's column
+// and background four pixels above and below it (like boxLineY()).
 // Returns its height, or -1.
 float clLineNear(float y0, float reach, vec2 res) {
-    vec3 xs = vec3(0.45, 0.66, 0.88) * res.x;
     for (int i = 0; i < 81; i++) {
         float off = float((i + 1) / 2) * (i % 2 == 0 ? 1.0 : -1.0);
         if (abs(off) > reach) break;
         float y = floor(y0) + 0.5 + off;
-        if (colorDist(screenAt(vec2(xs.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.y, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.z, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        // Claude Code's box lines run across the whole window; a shorter line (zsh's
-        // underline under a path, a rule in some output) is not one.
-        if (colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        if (colorDist(screenAt(vec2(xs.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
-                || colorDist(screenAt(vec2(xs.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        if (!onBoxLine(y, res)) continue;
         return y;
     }
     return -1.0;
@@ -779,7 +788,7 @@ vec3 linesLook(vec2 p, vec3 col) {
     // With only the line color (no LINE_EFFECT light), background pixels have nothing to do.
     if (!LINE_EFFECT && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
     float lineY = clLineNear(p.y, 0.2 * h, res);
-    if (lineY < 0.0) return col;
+    if (lineY < 0.0 || colorDist(screenAt(vec2(p.x, lineY) / res).rgb, iBackgroundColor) < 0.03) return col;
     // Only inside an input box: there is a box line just below the cursor too (a
     // shell, or a program with a long rule somewhere, stays plain).
     if (clLineNear(cur.y - 1.7 * h, 0.7 * h, res) < 0.0) return col;
@@ -800,17 +809,12 @@ float luma(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
-// A line across the whole window at height y (Claude Code's input box border): one
+// A box line at height y (Claude Code's input box border): one
 // color, not the background, at twelve points along it, and background four pixels
 // above and below. A long row of text can have ink at a few points along one pixel
 // row, but never the same color all the way across.
 bool fullLine(float y, vec2 res) {
-    vec3 first = screenAt(vec2(0.05 * res.x, y) / res).rgb;
-    if (colorDist(first, iBackgroundColor) < 0.03) return false;
-    for (int i = 1; i < 12; i++)
-        if (distance(screenAt(vec2((0.05 + 0.08 * float(i)) * res.x, y) / res).rgb, first) > 0.03) return false;
-    return colorDist(screenAt(vec2(0.45 * res.x, y + 4.0) / res).rgb, iBackgroundColor) < 0.03
-        && colorDist(screenAt(vec2(0.45 * res.x, y - 4.0) / res).rgb, iBackgroundColor) < 0.03;
+    return onBoxLine(y, res);
 }
 
 // Such a line between heights y0 and y1, searched from y0 upward (or from y1 downward
@@ -1222,13 +1226,37 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
     fragColor = vec4(min(fragColor.rgb + light, vec3(1.0)), fragColor.a);
 }
 
+// Effects stay in the pane the input box is in: a pixel counts when the box line under the cursor
+// runs unbroken from the cursor's column to it. With no box in sight (a shell) nothing is limited.
+// Only pixels an effect changed get here, so the walk costs nothing on the rest of the screen.
+bool inBoxPane(float x, vec2 res) {
+    vec4 cur = upCursor(iCurrentCursor);
+    float y = clLineNear(cur.y - 1.7 * cur.w, 0.7 * cur.w, res);
+    if (y < 0.0) return true;
+    float from = boxColumnX(), step1 = cellWOf(cur), dir = x < from ? -1.0 : 1.0;
+    vec3 ink = screenAt(vec2(from, y) / res).rgb;
+    for (int i = 1; i < 400; i++) {
+        float at = from + dir * float(i) * step1;
+        if (dir * (at - x) >= 0.0) at = x;
+        if (distance(screenAt(vec2(at, y) / res).rgb, ink) > 0.03) return false;
+        if (at == x) return true;
+    }
+    return true;
+}
+
+void paneEffects(inout vec4 fragColor, vec2 fragCoord) {
+    vec3 before = fragColor.rgb;
+    effects(fragColor, fragCoord);
+    if (fragColor.rgb != before && !inBoxPane(fragCoord.x, iResolution.xy)) fragColor.rgb = before;
+}
+
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
     // The moving effects play only in the focused window; the colors (your text, the box
     // lines, the prompt mark) stay when you switch to another window or Space.
-    if (iFocus != 0 && iCursorVisible != 0) effects(fragColor, fragCoord);
+    if (iFocus != 0 && iCursorVisible != 0) paneEffects(fragColor, fragCoord);
     if (TEXT_COLOR && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = clamp(textTint(fragCoord, fragColor.rgb, res), 0.0, 1.0);
     if (iCursorVisible == 0 || iCurrentCursorStyle != CURSORSTYLE_BLOCK) return;
     if (LINE_EFFECT || (LINE_TINT && LINE_COLOR > 0.0)) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
