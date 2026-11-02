@@ -60,13 +60,16 @@
   // is still under the sent line, also with rows taller than the cursor (adjust-cell-height).
   const RULE = { row: 4, from: 16, to: COLS - 2 };
   const prompt = ['', '', '', '', '╭─ ~/tmp 35ms', '╰─ 80% ❯ ls'];
-  const strip = (a, b, row, y0, y1, from, to) => {
+  // `seen` collects the changed pixels across frames: shockwave sends a narrow pulse along the line
+  // instead of lighting all of it at once, so the line counts as lit by what the run as a whole
+  // reached (on a light theme the pulse is fainter and was just under the mark in any one frame).
+  const strip = (a, b, row, y0, y1, from, to, seen = null) => {
     let n = 0;
     for (let y = H - (PADY + row * CH + y1); y < H - (PADY + row * CH + y0); y++) for (let x = PADX + from * CW; x < PADX + to * CW; x++) {
       const i = (y * W + x) * 4;
-      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) n++;
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) { n++; if (seen) seen.add(i); }
     }
-    return n;
+    return seen ? seen.size : n;
   };
   out.shell = { ruleLit: 1e9, textLit: 0, underLit: 0 };
   for (const screen of [
@@ -76,16 +79,73 @@
     { rows: prompt, short: RULE, cur: { row: 6, col: 0 }, curH: 40 },
   ]) {
     let rule = 0, text = 0, under = 0;
+    const seen = new Set();
     for (const since of [0.06, 0.12, 0.25, 0.4]) {
       const off = render(T0 + since, T0, { screen });
       const on = render(T0 + since, T0, { screen, signal: 'enter' });
-      rule = Math.max(rule, strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, RULE.from + 2, RULE.to - 2));
+      rule = strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, RULE.from + 2, RULE.to - 2, seen);
       text = Math.max(text, strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, 0, 12));
       under = Math.max(under, strip(off, on, 5, CH - 3, CH + 3, 14, RULE.to - 2));
     }
     out.shell.ruleLit = Math.min(out.shell.ruleLit, rule);
     out.shell.textLit = Math.max(out.shell.textLit, text);
     out.shell.underLit = Math.max(out.shell.underLit, under);
+  }
+  // A shell in a herdr pane: the sidebar left of it ends in a separator (│ top to bottom), a split
+  // border right of it. Enter and done stay between the two, with the prompt's own line or without
+  // one (the line under the sent row then), the cursor on the new prompt or at the pane's left edge.
+  const L = 10, R = 46, pad = s => ' '.repeat(L) + s;
+  const herdrRule = { row: 4, from: L + 16, to: R - 2 };
+  const outsidePane = (a, b) => {
+    let n = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (x >= PADX + L * CW && x < PADX + (R - 1) * CW) continue;
+      const i = (y * W + x) * 4;
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) n++;
+    }
+    return n;
+  };
+  // Also with 1 px wide edges, and in a bordered pane with the cursor on its first row (the edges
+  // start in the middle of the border row above, at its corners ┌ ┐).
+  out.herdr = { lit: 1e9, spill: 0 };
+  const thin = [{ col: L - 1, px: 1 }, { col: R - 1, px: 1 }];
+  const bordered = [{ col: L - 1, fromRow: 4 }, { col: R - 1, fromRow: 4 }];
+  for (const screen of [
+    { rows: prompt.map(pad), short: herdrRule, cur: { row: 5, col: L + 12 } },
+    { rows: prompt.map(pad), short: herdrRule, cur: { row: 6, col: L } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls')], cur: { row: 5, col: L } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls'), pad('~/tmp $ ')], cur: { row: 5, col: L + 8 } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls'), pad('~/tmp $ ')], cur: { row: 5, col: L + 8 }, walls: thin },
+    { rows: ['', '', '', '', '', pad('~/tmp $ ')], short: { row: 4, from: L - 1, to: R }, cur: { row: 5, col: L + 8 }, walls: bordered },
+  ]) {
+    screen.pane = [L, R - 1];
+    screen.walls ??= [L - 1, R - 1];
+    let lit = 0;
+    for (const signal of ['enter', 'done']) for (const since of [0.06, 0.12, 0.25, 0.4, 0.6]) {
+      const off = render(T0 + since, T0, { screen });
+      const on = render(T0 + since, T0, { screen, signal });
+      out.herdr.spill = Math.max(out.herdr.spill, outsidePane(off, on));
+      lit = Math.max(lit, changed(off, on, [3, 4, 5, 6, 7], [L, R - 1]).inside);
+    }
+    out.herdr.lit = Math.min(out.herdr.lit, lit);
+  }
+  // Enter in a shell with no prompt line, the cursor already at the start of the next row: the
+  // effect goes to the sent row, at the window's left edge and at a herdr pane's left edge alike.
+  // Changed pixels around the bottom of the sent row and of the cursor's row, right of the text.
+  out.leftEdge = {};
+  for (const [name, screen] of Object.entries({
+    window: { rows: ['', '', '', '', '~/tmp $ ls'], cur: { row: 5, col: 0 } },
+    herdr: { rows: ['', '', '', '', pad('~/tmp $ ls')], cur: { row: 5, col: L }, pane: [L, R - 1], walls: [L - 1, R - 1] },
+  })) {
+    const x0 = screen.cur.col + 14, x1 = screen.cur.col + 30;
+    let sent = 0, below = 0;
+    for (const since of [0.06, 0.12, 0.25, 0.4]) {
+      const off = render(T0 + since, T0, { screen });
+      const on = render(T0 + since, T0, { screen, signal: 'enter' });
+      sent = Math.max(sent, strip(off, on, 4, CH / 2, CH + CH / 2, x0, x1));
+      below = Math.max(below, strip(off, on, 5, CH / 2, CH + CH / 2, x0, x1));
+    }
+    out.leftEdge[name] = { sent, below };
   }
   // A hash of a few frames, to compare a shader's output between two versions of it.
   let hash = 2166136261;

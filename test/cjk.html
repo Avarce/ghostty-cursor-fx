@@ -23,12 +23,20 @@ const wide = ch => /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch
 // bar: row(s) on a background (Claude Code's grey sent-prompt bar unless given); cur: { row, col, wide, hidden }; curH: the cursor's
 // height, centered in its row (Ghostty's rows are taller than the cursor with adjust-cell-height).
 // pane: [firstCol, endCol] the columns the box lines span, with other text left and right of it (a sidebar,
-// a split); short: { row, from, to } a short line in a row (an underline).
+// a split); short: { row, from, to } a short line in a row (an underline); walls: a pane edge in a
+// column, like herdr's sidebar separator or a pane border: │ mid-cell, top to bottom; a column, or
+// { col, px, fromRow } (px wide, 2 by default; starting in the middle of fromRow, like a corner ┌).
 let CURH = CH;
-function drawTerm({ rows = [], box = null, cur = { row: 6, col: 2 }, bar = null, lineW = 4, curH = CH, pane = null, short = null } = {}) {
+function drawTerm({ rows = [], box = null, cur = { row: 6, col: 2 }, bar = null, lineW = 4, curH = CH, pane = null, short = null, walls = [] } = {}) {
   CURH = curH;
   tc.fillStyle = BG; tc.fillRect(0, 0, W, H);
   tc.textBaseline = 'top';
+  tc.fillStyle = '#5a5a6a';
+  for (const w of walls) {
+    const { col, px = 2, fromRow = null } = typeof w === 'number' ? { col: w } : w;
+    const top = fromRow === null ? 0 : PADY + fromRow * CH + CH / 2;
+    tc.fillRect(PADX + col * CW + Math.floor((CW - px) / 2), top, px, H - top);
+  }
   for (const b of [].concat(bar ?? [])) {  // a row number (Claude Code's #373737), or { row, color }
     tc.fillStyle = b.color || '#373737'; tc.fillRect(PADX, PADY + (b.row ?? b) * CH, W - 2 * PADX, CH);
   }
