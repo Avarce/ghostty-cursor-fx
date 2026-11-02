@@ -60,13 +60,16 @@
   // is still under the sent line, also with rows taller than the cursor (adjust-cell-height).
   const RULE = { row: 4, from: 16, to: COLS - 2 };
   const prompt = ['', '', '', '', '╭─ ~/tmp 35ms', '╰─ 80% ❯ ls'];
-  const strip = (a, b, row, y0, y1, from, to) => {
+  // `seen` collects the changed pixels across frames: shockwave sends a narrow pulse along the line
+  // instead of lighting all of it at once, so the line counts as lit by what the run as a whole
+  // reached (on a light theme the pulse is fainter and was just under the mark in any one frame).
+  const strip = (a, b, row, y0, y1, from, to, seen = null) => {
     let n = 0;
     for (let y = H - (PADY + row * CH + y1); y < H - (PADY + row * CH + y0); y++) for (let x = PADX + from * CW; x < PADX + to * CW; x++) {
       const i = (y * W + x) * 4;
-      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) n++;
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) { n++; if (seen) seen.add(i); }
     }
-    return n;
+    return seen ? seen.size : n;
   };
   out.shell = { ruleLit: 1e9, textLit: 0, underLit: 0 };
   for (const screen of [
@@ -76,10 +79,11 @@
     { rows: prompt, short: RULE, cur: { row: 6, col: 0 }, curH: 40 },
   ]) {
     let rule = 0, text = 0, under = 0;
+    const seen = new Set();
     for (const since of [0.06, 0.12, 0.25, 0.4]) {
       const off = render(T0 + since, T0, { screen });
       const on = render(T0 + since, T0, { screen, signal: 'enter' });
-      rule = Math.max(rule, strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, RULE.from + 2, RULE.to - 2));
+      rule = strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, RULE.from + 2, RULE.to - 2, seen);
       text = Math.max(text, strip(off, on, 4, CH / 2 - 2, CH / 2 + 2, 0, 12));
       under = Math.max(under, strip(off, on, 5, CH - 3, CH + 3, 14, RULE.to - 2));
     }
