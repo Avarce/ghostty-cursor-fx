@@ -25,6 +25,10 @@
 // config when you switch effects, and install.sh on install. Off, its code costs nothing.
 #define SEE_THROUGH false
 
+// A light theme (or a light:…,dark:… pair): `cursor-fx` sets this from your Ghostty config when
+// you switch effects, and install.sh on install. Off, the light-theme code costs nothing.
+#define LIGHT_THEME false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // sparks fly off the cursor with every keystroke
@@ -85,12 +89,42 @@ const float BOLT_WIDTH     = 0.06;  // the hot core's thickness, in character he
 // so with Y_DOWN (top of the file) mainImage turns its pixel and the cursors
 // over and screenAt() turns every read of the screen back.
 
+// Light themes: the effects add light, which a light background can't show. So on a light
+// background everything below works on an inverted picture (screen and colors), and mainImage()
+// inverts the result back: light becomes ink in the same color. A dark theme is untouched.
+bool lightTheme() {
+    return LIGHT_THEME && dot(iBackgroundColor, vec3(0.2126, 0.7152, 0.0722)) > 0.5;
+}
+
+// Whether the screen texture is linear (see colorDist()), set once per pixel by mainImage(). The
+// inversion has to happen in sRGB, like the colors', or the two would no longer match.
+bool screenLinear = false;
+
+vec3 themeFlip(vec3 c) {
+    if (!screenLinear) return 1.0 - c;
+    c = clamp(c, 0.0, 1.0);
+    c = 1.0 - mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+// A built-in color, inverted like the theme's on a light background so its ink keeps the hue.
+vec3 themeColor(vec3 c) {
+    return lightTheme() ? 1.0 - c : c;
+}
+
+#define iBackgroundColor (lightTheme() ? 1.0 - iBackgroundColor : iBackgroundColor)
+#define iForegroundColor (lightTheme() ? 1.0 - iForegroundColor : iForegroundColor)
+#define iCursorText (lightTheme() ? 1.0 - iCursorText : iCursorText)
+#define iCurrentCursorColor (lightTheme() ? vec4(1.0 - iCurrentCursorColor.rgb, iCurrentCursorColor.a) : iCurrentCursorColor)
+#define iPreviousCursorColor (lightTheme() ? vec4(1.0 - iPreviousCursorColor.rgb, iPreviousCursorColor.a) : iPreviousCursorColor)
+
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
     vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
     // A translucent window: Ghostty hands the screen over premultiplied, so the background
     // would never match iBackgroundColor. mainImage() multiplies again at the end.
     if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
+    if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
 }
 
@@ -153,6 +187,7 @@ bool cursorDrawn(vec2 lo, vec4 cur, vec2 res) {
 // it was on in a way that means the same Enter (Claude Code clearing its input box
 // after the signal arrived).
 bool oddByte(float v) {
+    if (lightTheme()) v = 1.0 - v;  // the signal's bit is in the real color
     return mod(floor(v * 255.0 + 0.5), 2.0) > 0.5;
 }
 
@@ -246,7 +281,7 @@ vec3 boltLightC(float d, float width, float glow, float strength, vec3 glowCol) 
 }
 
 vec3 boltLight(float d, float width, float glow, float strength) {
-    return boltLightC(d, width, glow, strength, sRGBToLinear(BOLT_COLOR));
+    return boltLightC(d, width, glow, strength, sRGBToLinear(themeColor(BOLT_COLOR)));
 }
 
 // The bolt's flicker: the first two steps always strike, later ones at random.
@@ -290,7 +325,7 @@ float boxLineY(vec2 p, vec2 center, vec4 cur, vec2 res, float reach) {
 // it, sparks spraying off just behind the head, and a glow that lingers and
 // fades over SEND_DURATION. t = seconds in.
 vec3 surge(vec2 p, float lineY, float x0, float t, vec2 res, float cellH, float cellW, bool inward) {
-    vec3 glowCol = sRGBToLinear(BOLT_COLOR);
+    vec3 glowCol = sRGBToLinear(themeColor(BOLT_COLOR));
     float glowPx = GLOW_RADIUS * cellH * (SUBTLE ? 0.45 : 1.0);  // subtle: a tighter glow, one strand, no sparks
     float frontDist = t / SURGE_TIME * res.x;
     float side = inward ? (p.x < 0.5 * res.x ? 1.0 : -1.0) : (p.x < x0 ? -1.0 : 1.0);  // which way the head moves here
@@ -786,7 +821,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
 
             // Flash where it lands, fading out within 0.1s.
             float flash = 1.0 - smoothstep(0.0, 2.0 * cellH, distance(p, to));
-            light += sRGBToLinear(BOLT_COLOR) * flash * (SUBTLE ? 0.1 : 0.35) * max(0.0, 1.0 - sinceMove / 0.1);
+            light += sRGBToLinear(themeColor(BOLT_COLOR)) * flash * (SUBTLE ? 0.1 : 0.35) * max(0.0, 1.0 - sinceMove / 0.1);
         }
     }
 
@@ -858,6 +893,12 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
 // Everything above works on the screen without a translucent window's transparency (see
 // screenAt()); the window wants it back.
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    if (lightTheme()) {
+        vec4 t = texture(iChannel0, vec2(0.001));
+        vec3 corner = t.rgb / max(t.a, 0.01), bg = 1.0 - iBackgroundColor;
+        screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
+    }
     effectImage(fragColor, fragCoord);
+    if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
     if (SEE_THROUGH && fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }

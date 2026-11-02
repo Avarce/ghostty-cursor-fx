@@ -26,6 +26,10 @@
 // config when you switch effects, and install.sh on install. Off, its code costs nothing.
 #define SEE_THROUGH false
 
+// A light theme (or a light:…,dark:… pair): `cursor-fx` sets this from your Ghostty config when
+// you switch effects, and install.sh on install. Off, the light-theme code costs nothing.
+#define LIGHT_THEME false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // the cursor tears into slices with magenta and cyan copies as you type
@@ -86,12 +90,42 @@ const float NOISE_BLOCKS  = 3.0;   // small flashing blocks around the cursor
 // so with Y_DOWN (top of the file) mainImage turns its pixel and the cursors
 // over and screenAt() turns every read of the screen back.
 
+// Light themes: the effects add light, which a light background can't show. So on a light
+// background everything below works on an inverted picture (screen and colors), and mainImage()
+// inverts the result back: light becomes ink in the same color. A dark theme is untouched.
+bool lightTheme() {
+    return LIGHT_THEME && dot(iBackgroundColor, vec3(0.2126, 0.7152, 0.0722)) > 0.5;
+}
+
+// Whether the screen texture is linear (see colorDist()), set once per pixel by mainImage(). The
+// inversion has to happen in sRGB, like the colors', or the two would no longer match.
+bool screenLinear = false;
+
+vec3 themeFlip(vec3 c) {
+    if (!screenLinear) return 1.0 - c;
+    c = clamp(c, 0.0, 1.0);
+    c = 1.0 - mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+#define iBackgroundColor (lightTheme() ? 1.0 - iBackgroundColor : iBackgroundColor)
+#define iForegroundColor (lightTheme() ? 1.0 - iForegroundColor : iForegroundColor)
+#define iCursorText (lightTheme() ? 1.0 - iCursorText : iCursorText)
+#define iCurrentCursorColor (lightTheme() ? vec4(1.0 - iCurrentCursorColor.rgb, iCurrentCursorColor.a) : iCurrentCursorColor)
+#define iPreviousCursorColor (lightTheme() ? vec4(1.0 - iPreviousCursorColor.rgb, iPreviousCursorColor.a) : iPreviousCursorColor)
+
+// The palette's colors, inverted like the others on a light background.
+vec3 themePalette(int i) {
+    return lightTheme() ? 1.0 - iPalette[i] : iPalette[i];
+}
+
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
     vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
     // A translucent window: Ghostty hands the screen over premultiplied, so the background
     // would never match iBackgroundColor. mainImage() multiplies again at the end.
     if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
+    if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
 }
 
@@ -169,6 +203,7 @@ bool cursorDrawn(vec2 lo, vec4 cur, vec2 res) {
 // it was on in a way that means the same Enter (Claude Code clearing its input box
 // after the signal arrived).
 bool oddByte(float v) {
+    if (lightTheme()) v = 1.0 - v;  // the signal's bit is in the real color
     return mod(floor(v * 255.0 + 0.5), 2.0) > 0.5;
 }
 
@@ -280,7 +315,7 @@ vec3 enterEffect(vec2 p, vec4 cur, vec2 center, float cellW, float cellH, vec2 r
     if (abs(dy) < 0.4 * cellH) {
         vec2 blk = floor(vec2(p.x / (1.5 * cellW), (dy + 0.4 * cellH) / (0.2 * cellH)));
         float flash = step(1.0 - 0.12 * s, hash21(blk + stepId + lineY));
-        vec3 bc = hash21(blk.yx + stepId) < 0.5 ? iPalette[13] : iPalette[14];
+        vec3 bc = hash21(blk.yx + stepId) < 0.5 ? themePalette(13) : themePalette(14);
         col = mix(col, sRGBToLinear(bc), 0.7 * flash);
     }
 
@@ -359,7 +394,7 @@ vec3 cursorLook(vec2 p, vec3 col) {
     col *= 1.0 - 0.16 * CURSOR_STRENGTH * clOnBlock(col) * step(0.5, fract(p.y / 3.0));
     if (burst > 0.0 && d > -1.0 && d < 0.3 * cellH) {
         float hb = clHash(floor((p - lo) / vec2(0.3 * cur.z, 0.12 * cur.w)) + frame * 3.1);
-        if (hb > 0.92) col = mix(col, sRGBToLinear(hb > 0.96 ? iPalette[13] : iPalette[14]), 0.75);
+        if (hb > 0.92) col = mix(col, sRGBToLinear(hb > 0.96 ? themePalette(13) : themePalette(14)), 0.75);
     }
     return col + k * exp(-max(d, 0.0) / (0.08 * cellH)) * 0.18 * step(0.0, d) * CURSOR_STRENGTH;
 }
@@ -482,7 +517,7 @@ vec3 markLook(vec2 p, vec3 col, float ink, float halo, vec2 m, float w, float h,
     float frame = floor(t * 12.0);
     float o = (1.0 + clHash(vec2(frame, 4.0)) * live) * max(1.0, 0.08 * w);
     float iL = clMarkInk(p + vec2(o, 0.0), m, w, h, res), iR = clMarkInk(p - vec2(o, 0.0), m, w, h, res);
-    col += (sRGBToLinear(iPalette[13]) * iL + sRGBToLinear(iPalette[14]) * iR) * 0.6 * (1.0 - ink);
+    col += (sRGBToLinear(themePalette(13)) * iL + sRGBToLinear(themePalette(14)) * iR) * 0.6 * (1.0 - ink);
     return mix(col, mix(col, k, 0.6), ink) + k * halo * (1.0 - ink) * 0.15;
 }
 
@@ -586,8 +621,8 @@ bool clLineBetween(float y0, float y1, vec2 res) {
 vec3 lineLook(vec2 p, vec3 col, float lineY, float h, vec2 res, float t, float live) {
     vec3 k = sRGBToLinear(iCurrentCursorColor.rgb);
     float dy = abs(p.y - lineY), core = exp(-dy / (0.03 * h)), soft = exp(-dy / (0.14 * h));
-    vec3 light = (sRGBToLinear(iPalette[13]) * exp(-abs(p.y - lineY - 1.5) / (0.025 * h))
-                + sRGBToLinear(iPalette[14]) * exp(-abs(p.y - lineY + 1.5) / (0.025 * h))) * 0.3;
+    vec3 light = (sRGBToLinear(themePalette(13)) * exp(-abs(p.y - lineY - 1.5) / (0.025 * h))
+                + sRGBToLinear(themePalette(14)) * exp(-abs(p.y - lineY + 1.5) / (0.025 * h))) * 0.3;
     float win = floor(t / 1.2), frame = floor(t * 12.0);
     if (live > 0.0 && t - win * 1.2 < 0.12 && dy < 0.3 * h) {
         float seg = floor(p.x / (2.0 * h));
@@ -748,8 +783,8 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
         // Magenta copy on the left, cyan on the right, torn with the same slices.
         vec2 g = vec2(GHOST_SHIFT * cellW * s, 0.0);
         float outside = 1.0 - inRect(q, lo, hi);
-        col = screenBlend(col, sRGBToLinear(iPalette[13]), GHOST_ALPHA * s * outside * inRect(q + g, lo, hi));
-        col = screenBlend(col, sRGBToLinear(iPalette[14]), GHOST_ALPHA * s * outside * inRect(q - g, lo, hi));
+        col = screenBlend(col, sRGBToLinear(themePalette(13)), GHOST_ALPHA * s * outside * inRect(q + g, lo, hi));
+        col = screenBlend(col, sRGBToLinear(themePalette(14)), GHOST_ALPHA * s * outside * inRect(q - g, lo, hi));
     }
 
     // A few small blocks flashing around the cursor.
@@ -760,7 +795,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
         vec2 hs = vec2(cellW * (0.2 + 0.5 * hash21(vec2(i + 13.0, stepId))),
                        cellH * (0.04 + 0.08 * hash21(vec2(i + 17.0, stepId))));
         float pick = hash21(vec2(i + 19.0, stepId));
-        vec3 bc = pick < 0.34 ? iCurrentCursorColor.rgb : (pick < 0.67 ? iPalette[13] : iPalette[14]);
+        vec3 bc = pick < 0.34 ? iCurrentCursorColor.rgb : (pick < 0.67 ? themePalette(13) : themePalette(14));
         col = mix(col, sRGBToLinear(bc), 0.8 * inRect(p, c - hs, c + hs));
     }
 
@@ -791,6 +826,12 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
 // Everything above works on the screen without a translucent window's transparency (see
 // screenAt()); the window wants it back.
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    if (lightTheme()) {
+        vec4 t = texture(iChannel0, vec2(0.001));
+        vec3 corner = t.rgb / max(t.a, 0.01), bg = 1.0 - iBackgroundColor;
+        screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
+    }
     effectImage(fragColor, fragCoord);
+    if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
     if (SEE_THROUGH && fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }

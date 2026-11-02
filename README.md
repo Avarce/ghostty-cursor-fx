@@ -68,9 +68,10 @@ redrawing the screen never set anything off.
 - **pi** needs "Show hardware cursor" on. Without it Ghostty sees no cursor: no cursor look,
   typing or done effects, and Enter plays where the cursor was last seen. The pi signals are
   checked with pi 1.4.0; the effects in pi are not yet checked in Ghostty.
-- **See-through windows** (`background-opacity` below 1) work: `cursor-fx` turns the shaders'
-  see-through support on when you pick an effect, and off in an opaque window, where it costs
-  nothing. After changing `background-opacity`, run `cursor-fx <effect>` once. Checked on macOS.
+- **See-through windows and light themes** work: when you pick an effect, `cursor-fx` turns the
+  shaders' support on for a `background-opacity` below 1 or a light theme (or a `light:…,dark:…`
+  pair), and off otherwise, where it costs nothing. After changing either, run
+  `cursor-fx <effect>` once. See-through windows are checked on macOS.
 - **bash and fish**: only the zsh hook ships; the README's snippets for other shells are untested.
 - **Battery**: while any animated effect is on, Ghostty redraws the focused window continuously.
   `cursor-fx idle off` makes the screen calmer; `cursor-fx off` is the only real saver.
@@ -79,7 +80,8 @@ redrawing the screen never set anything off.
 
 - Ghostty 1.4 or newer on **macOS or Linux** (Ghostty has no Windows build).
 - Python 3.8 or newer (for `cursor-fx`; no packages needed; the one that comes with macOS works).
-- A dark theme: the effects add light, so on a light background they are faint. Colors sit in the
+- A dark or a light theme. On a light background the effects draw ink instead of light, in their
+  own colors (embers is faint there); cyber then leaves your text its own color. Colors sit in the
   7–9.5:1 contrast range on a dark grey background.
 - A block cursor (Ghostty's default). With a bar or underline cursor (for example vim's insert mode)
   the cursor, prompt-mark and box-line looks stay off; the moves and Enter effects still play.

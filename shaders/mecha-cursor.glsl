@@ -22,6 +22,10 @@
 // config when you switch effects, and install.sh on install. Off, its code costs nothing.
 #define SEE_THROUGH false
 
+// A light theme (or a light:…,dark:… pair): `cursor-fx` sets this from your Ghostty config when
+// you switch effects, and install.sh on install. Off, the light-theme code costs nothing.
+#define LIGHT_THEME false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT      = true;  // a short thruster burst fires behind the cursor as you type
@@ -79,12 +83,42 @@ const vec3  THRUST_COLOR   = vec3(0.62, 0.84, 1.0);  // the thrusters' exhaust
 // mainImage turns its pixel and the cursors over and screenAt() turns every
 // read of the screen back.
 
+// Light themes: the effects add light, which a light background can't show. So on a light
+// background everything below works on an inverted picture (screen and colors), and mainImage()
+// inverts the result back: light becomes ink in the same color. A dark theme is untouched.
+bool lightTheme() {
+    return LIGHT_THEME && dot(iBackgroundColor, vec3(0.2126, 0.7152, 0.0722)) > 0.5;
+}
+
+// Whether the screen texture is linear (see colorDist()), set once per pixel by mainImage(). The
+// inversion has to happen in sRGB, like the colors', or the two would no longer match.
+bool screenLinear = false;
+
+vec3 themeFlip(vec3 c) {
+    if (!screenLinear) return 1.0 - c;
+    c = clamp(c, 0.0, 1.0);
+    c = 1.0 - mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+// A built-in color, inverted like the theme's on a light background so its ink keeps the hue.
+vec3 themeColor(vec3 c) {
+    return lightTheme() ? 1.0 - c : c;
+}
+
+#define iBackgroundColor (lightTheme() ? 1.0 - iBackgroundColor : iBackgroundColor)
+#define iForegroundColor (lightTheme() ? 1.0 - iForegroundColor : iForegroundColor)
+#define iCursorText (lightTheme() ? 1.0 - iCursorText : iCursorText)
+#define iCurrentCursorColor (lightTheme() ? vec4(1.0 - iCurrentCursorColor.rgb, iCurrentCursorColor.a) : iCurrentCursorColor)
+#define iPreviousCursorColor (lightTheme() ? vec4(1.0 - iPreviousCursorColor.rgb, iPreviousCursorColor.a) : iPreviousCursorColor)
+
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
     vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
     // A translucent window: Ghostty hands the screen over premultiplied, so the background
     // would never match iBackgroundColor. mainImage() multiplies again at the end.
     if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
+    if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
 }
 
@@ -146,6 +180,7 @@ bool cursorDrawn(vec2 lo, vec4 cur, vec2 res) {
 }
 
 bool oddByte(float v) {
+    if (lightTheme()) v = 1.0 - v;  // the signal's bit is in the real color
     return mod(floor(v * 255.0 + 0.5), 2.0) > 0.5;
 }
 
@@ -387,7 +422,7 @@ vec3 blade(vec2 p, float lineY, float x0, float t, vec2 res, float cellH, bool i
     if (lit <= 0.0) return vec3(0.0);
     float fade = 1.0 - smoothstep(0.65, 1.0, t / ENTER_TIME);
     float hum = 0.93 + 0.07 * sin(t * 47.0 + p.x * 0.02);
-    vec3 beam = sRGBToLinear(BEAM_COLOR), hot = sRGBToLinear(CORE_COLOR);
+    vec3 beam = sRGBToLinear(themeColor(BEAM_COLOR)), hot = sRGBToLinear(CORE_COLOR);
     float core = 1.0 - smoothstep(0.5 * BEAM_WIDTH * cellH, BEAM_WIDTH * cellH + 0.5, dy);
     float glow = SUBTLE ? exp(-dy / (0.5 * GLOW_RADIUS * cellH)) * 0.7  // subtle: a tight glow, no wide haze
                         : exp(-dy / (GLOW_RADIUS * cellH)) * 0.7 + exp(-dy / (2.5 * GLOW_RADIUS * cellH)) * 0.18;
@@ -407,7 +442,7 @@ vec3 clash(vec2 p, float lineY, float t, vec2 res, float cellH) {
     float r = length(d);
     if (r > 2.6 * cellH) return vec3(0.0);
     float u = tc / CLASH_TIME, k = (1.0 - u) * (1.0 - u);
-    vec3 hot = sRGBToLinear(CORE_COLOR), beam = sRGBToLinear(BEAM_COLOR);
+    vec3 hot = sRGBToLinear(CORE_COLOR), beam = sRGBToLinear(themeColor(BEAM_COLOR));
     vec3 light = (hot * 0.7 + beam * 0.6) * exp(-r / (0.3 * cellH)) * k;
     light += beam * exp(-abs(r - u * 1.6 * cellH) / (0.05 * cellH)) * (1.0 - u) * 0.6;
     for (int i = 0; i < 10; i++) {
@@ -451,7 +486,7 @@ vec3 thruster(vec2 p, vec2 lo, vec2 hi, float cellH, float cellW, float t, float
     float grain = clHash(vec2(floor(p.x / 2.0), floor(t * 40.0)));
     float body = exp(-pow(dy / width, 2.0)) * (1.0 - k) * (0.75 + 0.25 * grain);
     float core = exp(-pow(dy / (0.35 * width), 2.0)) * (1.0 - k) * (1.0 - k);
-    vec3 th = sRGBToLinear(THRUST_COLOR);
+    vec3 th = sRGBToLinear(themeColor(THRUST_COLOR));
     return (th * body * 0.7 + mix(th, vec3(1.0), 0.6) * core * 0.6) * (1.0 - u) * BRIGHTNESS;
 }
 
@@ -466,7 +501,7 @@ vec3 shot(vec2 p, vec2 from, vec2 to, float cellH, float t) {
     float s = clamp(dot(pa, dir) / L2, 0.0, 1.0), d = length(pa - dir * s);
     float rm = length(p - from), ri = length(p - to);
     if (d > 0.8 * cellH && rm > 1.2 * cellH && ri > 1.2 * cellH) return vec3(0.0);
-    vec3 beam = sRGBToLinear(BEAM_COLOR), hot = sRGBToLinear(CORE_COLOR);
+    vec3 beam = sRGBToLinear(themeColor(BEAM_COLOR)), hot = sRGBToLinear(CORE_COLOR);
     float travel = clamp(t / 0.12, 0.0, 1.0);
     float bolt = smoothstep(travel - 0.3, travel - 0.05, s) * (1.0 - smoothstep(travel, travel + 0.02, s))
                * (t < 0.12 ? 1.0 : exp(-(t - 0.12) / 0.05));
@@ -550,7 +585,7 @@ vec3 cursorLook(vec2 p, vec3 col, vec2 res) {
     if (max(q.x, q.y) > 0.0) {
         if (!cursorDrawn(lo, cur, res)) return col;
         float e = length(max(q, 0.0));
-        return col + sRGBToLinear(vec3(0.55, 0.7, 1.0)) * exp(-0.5 * pow(e / (0.03 * cellH), 2.0)) * 0.18 * CURSOR_STRENGTH * BRIGHTNESS;
+        return col + sRGBToLinear(themeColor(vec3(0.55, 0.7, 1.0))) * exp(-0.5 * pow(e / (0.03 * cellH), 2.0)) * 0.18 * CURSOR_STRENGTH * BRIGHTNESS;
     }
     float onBlock = clOnBlock(col);
     if (onBlock <= 0.0) return col;
@@ -570,7 +605,7 @@ vec3 cursorLook(vec2 p, vec3 col, vec2 res) {
     }
     float detail = (1.0 - clear) * (1.0 - 0.45 * letter);
     bool lin = distance(col, sRGBToLinear(iCurrentCursorColor.rgb)) < distance(col, iCurrentCursorColor.rgb);
-    vec3 blue = ARMOR_BLUE, red = ARMOR_RED, yel = ARMOR_YELLOW, eye = vec3(0.45, 1.0, 0.55);
+    vec3 blue = themeColor(ARMOR_BLUE), red = themeColor(ARMOR_RED), yel = themeColor(ARMOR_YELLOW), eye = themeColor(vec3(0.45, 1.0, 0.55));
     if (lin) { blue = sRGBToLinear(blue); red = sRGBToLinear(red); yel = sRGBToLinear(yel); eye = sRGBToLinear(eye); }
     vec2 sz = hi - lo, P = p - lo, uv = P / sz;
     vec3 armor = col * (0.88 + 0.16 * uv.y);
@@ -604,7 +639,7 @@ vec3 cursorLook(vec2 p, vec3 col, vec2 res) {
 // The prompt mark as a targeting chevron in the armor's steel white with a cyan glow; every
 // 4 s two pairs of cyan corner brackets close in on it and fade (a lock-on).
 vec3 markLook(vec2 p, vec3 col, float ink, float halo, vec2 m, float w, float h, float t, float live) {
-    vec3 steel = sRGBToLinear(iCurrentCursorColor.rgb), beam = sRGBToLinear(BEAM_COLOR);
+    vec3 steel = sRGBToLinear(iCurrentCursorColor.rgb), beam = sRGBToLinear(themeColor(BEAM_COLOR));
     col = mix(col, mix(steel, vec3(1.0), 0.3), ink);
     col += beam * halo * (1.0 - ink) * 0.35;
     float u = fract(t / 4.0) * 4.0;
@@ -715,7 +750,7 @@ bool clLineBetween(float y0, float y1, vec2 res) {
 // The box lines as HUD rails: small ticks along them (every fifth one longer) and a
 // slow scan of light running across.
 vec3 lineLook(vec2 p, vec3 col, float lineY, float h, vec2 res, float t, float live) {
-    vec3 c = sRGBToLinear(vec3(0.62, 0.78, 1.0));
+    vec3 c = sRGBToLinear(themeColor(vec3(0.62, 0.78, 1.0)));
     float dy = abs(p.y - lineY), spacing = 1.2 * h;
     float major = step(mod(floor(p.x / spacing), 5.0), 0.5);
     float tick = (1.0 - smoothstep(0.6, 1.2, abs(mod(p.x, spacing) - 0.5 * spacing))) * step(dy, mix(0.1, 0.2, major) * h) * mix(0.35, 0.8, major);
@@ -803,6 +838,12 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
 // Everything above works on the screen without a translucent window's transparency (see
 // screenAt()); the window wants it back.
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    if (lightTheme()) {
+        vec4 t = texture(iChannel0, vec2(0.001));
+        vec3 corner = t.rgb / max(t.a, 0.01), bg = 1.0 - iBackgroundColor;
+        screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
+    }
     effectImage(fragColor, fragCoord);
+    if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
     if (SEE_THROUGH && fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }

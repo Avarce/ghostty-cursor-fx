@@ -20,6 +20,10 @@
 // config when you switch effects, and install.sh on install. Off, its code costs nothing.
 #define SEE_THROUGH false
 
+// A light theme (or a light:…,dark:… pair): `cursor-fx` sets this from your Ghostty config when
+// you switch effects, and install.sh on install. Off, the light-theme code costs nothing.
+#define LIGHT_THEME false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // tiny colored sparkles pop off the top of the cursor
@@ -68,12 +72,42 @@ const float GRAVITY      = 2.5;  // how fast sparks fall, in character heights p
 // so with Y_DOWN (top of the file) mainImage turns its pixel and the cursors
 // over and screenAt() turns every read of the screen back.
 
+// Light themes: the effects add light, which a light background can't show. So on a light
+// background everything below works on an inverted picture (screen and colors), and mainImage()
+// inverts the result back: light becomes ink in the same color. A dark theme is untouched.
+bool lightTheme() {
+    return LIGHT_THEME && dot(iBackgroundColor, vec3(0.2126, 0.7152, 0.0722)) > 0.5;
+}
+
+// Whether the screen texture is linear (see colorDist()), set once per pixel by mainImage(). The
+// inversion has to happen in sRGB, like the colors', or the two would no longer match.
+bool screenLinear = false;
+
+vec3 themeFlip(vec3 c) {
+    if (!screenLinear) return 1.0 - c;
+    c = clamp(c, 0.0, 1.0);
+    c = 1.0 - mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+// A built-in color, inverted like the theme's on a light background so its ink keeps the hue.
+vec3 themeColor(vec3 c) {
+    return lightTheme() ? 1.0 - c : c;
+}
+
+#define iBackgroundColor (lightTheme() ? 1.0 - iBackgroundColor : iBackgroundColor)
+#define iForegroundColor (lightTheme() ? 1.0 - iForegroundColor : iForegroundColor)
+#define iCursorText (lightTheme() ? 1.0 - iCursorText : iCursorText)
+#define iCurrentCursorColor (lightTheme() ? vec4(1.0 - iCurrentCursorColor.rgb, iCurrentCursorColor.a) : iCurrentCursorColor)
+#define iPreviousCursorColor (lightTheme() ? vec4(1.0 - iPreviousCursorColor.rgb, iPreviousCursorColor.a) : iPreviousCursorColor)
+
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
     vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
     // A translucent window: Ghostty hands the screen over premultiplied, so the background
     // would never match iBackgroundColor. mainImage() multiplies again at the end.
     if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
+    if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
 }
 
@@ -115,11 +149,11 @@ float segDist(vec2 p, vec2 a, vec2 b) {
 
 // The firework colors (sRGB): gold, pink, cyan, green, violet.
 vec3 palette(float k) {
-    if (k < 1.0) return vec3(1.0, 0.8, 0.35);
-    if (k < 2.0) return vec3(1.0, 0.4, 0.75);
-    if (k < 3.0) return vec3(0.35, 0.9, 1.0);
-    if (k < 4.0) return vec3(0.5, 1.0, 0.45);
-    return vec3(0.75, 0.55, 1.0);
+    if (k < 1.0) return themeColor(vec3(1.0, 0.8, 0.35));
+    if (k < 2.0) return themeColor(vec3(1.0, 0.4, 0.75));
+    if (k < 3.0) return themeColor(vec3(0.35, 0.9, 1.0));
+    if (k < 4.0) return themeColor(vec3(0.5, 1.0, 0.45));
+    return themeColor(vec3(0.75, 0.55, 1.0));
 }
 
 // Light from a short glowing streak from a to b.
@@ -148,7 +182,7 @@ vec3 firework(vec2 p, vec2 start, vec2 apex, float seed, float t, float cellH) {
         float xt = max(x - 0.3, 0.0);
         vec2 tail = mix(start, apex, 1.0 - (1.0 - xt) * (1.0 - xt));
         float flick = 0.7 + 0.3 * hash11(floor(iTime * 40.0));
-        light += streak(p, tail, head, w, sRGBToLinear(vec3(1.0, 0.85, 0.6)) * 0.6 * flick);
+        light += streak(p, tail, head, w, sRGBToLinear(themeColor(vec3(1.0, 0.85, 0.6))) * 0.6 * flick);
         light += vec3(1.0) * exp(-distance(p, head) / (0.08 * cellH)) * 0.9;
         return light;
     }
@@ -185,6 +219,7 @@ vec3 firework(vec2 p, vec2 start, vec2 apex, float seed, float t, float cellH) {
 // it was on in a way that means the same Enter (Claude Code clearing its input box
 // after the signal arrived).
 bool oddByte(float v) {
+    if (lightTheme()) v = 1.0 - v;  // the signal's bit is in the real color
     return mod(floor(v * 255.0 + 0.5), 2.0) > 0.5;
 }
 
@@ -287,15 +322,15 @@ vec3 enterEffect(vec2 p, vec4 cur, vec2 center, float cellW, float cellH, vec2 r
         float tick = floor(iTime * 40.0);
         float at = exp(-pow((dist - head) / (0.5 * cellH), 2.0));
         float flick = 0.7 + 0.3 * hash11(tick + float(k));
-        light += vec3(1.0, 0.9, 0.6) * at * exp(-dy / (0.25 * cellH)) * 1.2 * flick;  // the burning head
+        light += themeColor(vec3(1.0, 0.9, 0.6)) * at * exp(-dy / (0.25 * cellH)) * 1.2 * flick;  // the burning head
         for (float i = 0.0; i < 5.0; i += 1.0) {  // sparks spitting off it
             if (SUBTLE && i >= 2.0) break;
             float h = hash11(tick * 3.1 + i * 2.3 + float(k) * 9.0);
             vec2 sp = vec2(originX + side * head + (h - 0.5) * 1.2 * cellH, lineY + (hash11(h * 77.0 + i) - 0.5) * 1.6 * cellH);
-            light += sRGBToLinear(vec3(1.0, 0.85, 0.5)) * exp(-distance(p, sp) / (0.05 * cellH)) * 0.9;
+            light += sRGBToLinear(themeColor(vec3(1.0, 0.85, 0.5))) * exp(-distance(p, sp) / (0.05 * cellH)) * 0.9;
         }
         float burnt = (head - dist) / res.x * ENTER_FUSE;  // seconds since the fuse passed this spot
-        if (burnt > 0.0) light += vec3(1.0, 0.5, 0.15) * exp(-dy / (0.12 * cellH)) * exp(-burnt / 0.15) * 0.8;
+        if (burnt > 0.0) light += themeColor(vec3(1.0, 0.5, 0.15)) * exp(-dy / (0.12 * cellH)) * exp(-burnt / 0.15) * 0.8;
     }
     float lineY = lines.x >= 0.0 ? lines.x : lines.y;
     float up = lineY + (RISE_HEIGHT + 0.8 + BURST_RADIUS) * cellH > res.y ? -1.0 : 1.0;
@@ -390,7 +425,7 @@ vec3 cursorLook(vec2 p, vec3 col) {
         vec2 dp = abs(p - at);
         float size = 0.12 * cellH * life + 0.01;
         float star = 0.5 * (exp(-dp.x / 0.8) * exp(-dp.y / size) + exp(-dp.y / 0.8) * exp(-dp.x / size)) + exp(-length(dp) / 1.2);
-        vec3 tint = i == 1 ? sRGBToLinear(vec3(1.0, 0.45, 0.7)) : i == 3 ? sRGBToLinear(vec3(0.45, 0.85, 1.0)) : mix(k, vec3(1.0), 0.5);
+        vec3 tint = i == 1 ? sRGBToLinear(themeColor(vec3(1.0, 0.45, 0.7))) : i == 3 ? sRGBToLinear(themeColor(vec3(0.45, 0.85, 1.0))) : mix(k, vec3(1.0), 0.5);
         light += tint * star * life * 0.7 * live;
     }
     return col + light * CURSOR_STRENGTH;
@@ -785,6 +820,12 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
 // Everything above works on the screen without a translucent window's transparency (see
 // screenAt()); the window wants it back.
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    if (lightTheme()) {
+        vec4 t = texture(iChannel0, vec2(0.001));
+        vec3 corner = t.rgb / max(t.a, 0.01), bg = 1.0 - iBackgroundColor;
+        screenLinear = distance(corner, sRGBToLinear(bg)) < distance(corner, bg);
+    }
     effectImage(fragColor, fragCoord);
+    if (lightTheme()) fragColor.rgb = themeFlip(fragColor.rgb);
     if (SEE_THROUGH && fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }
