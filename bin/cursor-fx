@@ -24,14 +24,15 @@
                        command that took more than a few seconds)
   cursor-fx --version  the installed version
 
-Each effect is a preset in ~/.config/ghostty/cursor-effects/<name>.conf that sets
+Each effect is a preset in cursor-effects/<name>.conf next to the Ghostty config that sets
 the cursor color and its shader. Switching makes a savepoint, rewrites the one
 `config-file = cursor-effects/...` line in the Ghostty config, validates it, and
 reloads Ghostty (SIGUSR2, the same as Command+Shift+,) so the effect starts at once.
 
-Works on macOS and Linux (Ghostty has no Windows version): the config lives in
-$XDG_CONFIG_HOME/ghostty or ~/.config/ghostty on both, and both the macOS app and
-the Linux GTK app reload on SIGUSR2.
+Works on macOS and Linux (Ghostty has no Windows version): the config is the first
+config or config.ghostty in $XDG_CONFIG_HOME/ghostty (~/.config/ghostty), then in
+Ghostty's macOS folder, with symlinks followed to the real file; both the macOS app
+and the Linux GTK app reload on SIGUSR2.
 
 Test hooks: CURSOR_FX_CONFIG (config path; also skips the reload, since the running
 Ghostty doesn't read that file), CURSOR_FX_SAVEPOINTS, CURSOR_FX_TTY.

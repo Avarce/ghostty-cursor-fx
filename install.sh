@@ -51,15 +51,21 @@ import json, os, shutil, sys
 path, backup = sys.argv[1], sys.argv[2]
 data = {}
 if os.path.exists(path):
-    with open(path) as f:
-        data = json.load(f)
-if data.get("showHardwareCursor") is not True:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except ValueError:
+        data = None
+if not isinstance(data, dict):
+    print(f"Note: {path} isn't valid JSON, so it was left alone. "
+          "Turn on \"Show hardware cursor\" in pi's /settings for the effects.")
+elif data.get("showHardwareCursor") is not True:
     if os.path.exists(path):
         os.makedirs(backup, exist_ok=True)
         shutil.copy2(path, backup)
     data["showHardwareCursor"] = True
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
 PYSET
 fi
