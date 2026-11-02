@@ -71,4 +71,6 @@ EOF
 perl -pi -e 's/^(const bool\s+(?:ENTER_EFFECT|DONE_EFFECT|JUMP_EFFECTS)\s*=\s*)false;/${1}true;/' "$here"/shaders/*-cursor.glsl
 perl -pi -e 's/^(const bool\s+SUBTLE\s*=\s*)true;/${1}false;/' "$here"/shaders/*-cursor.glsl
 perl -pi -e 's/^(const int\s+DECODE_STYLE\s*=\s*)\d+;/${1}4;/' "$here"/shaders/cyber-cursor.glsl
+# The see-through switch follows each user's Ghostty config (cursor-fx sets it); the repo ships it off.
+perl -pi -e 's/^(#define\s+SEE_THROUGH\s+)true\b/${1}false/' "$here"/shaders/*-cursor.glsl
 echo "Synced from $config_dir and ~/.local/bin."

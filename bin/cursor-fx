@@ -341,11 +341,64 @@ def set_flag(flag, state):
     return 0
 
 
+# The translucent-window switch every shader has (see sync_see_through()).
+SEE_THROUGH_LINE = re.compile(r'^(#define\s+SEE_THROUGH\s+)(true|false)\b(.*)$')
+
+
+def background_opacity():
+    """Ghostty's background-opacity, 1.0 when unset or unknown: what Ghostty itself loads
+    (`ghostty +show-config`, so an included file counts too); with CURSOR_FX_CONFIG, that file's line."""
+    value = "1"
+    if "CURSOR_FX_CONFIG" in os.environ or not GHOSTTY:
+        value = settings(CONFIG).get("background-opacity", "1")
+    else:
+        try:
+            out = subprocess.run([GHOSTTY, "+show-config"], capture_output=True, text=True, timeout=10).stdout
+            found = re.findall(r'^background-opacity\s*=\s*(\S+)', out, re.M)
+            value = found[-1] if found else "1"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        return float(value)
+    except ValueError:
+        return 1.0
+
+
+def sync_see_through():
+    """Set SEE_THROUGH in every shader from Ghostty's background-opacity: on below 1 (every screen
+    read then takes the window's transparency out), off otherwise (that code then costs nothing).
+    Returns "on" or "off" when a shader changed, else None."""
+    want = "true" if background_opacity() < 1.0 else "false"
+    changed = 0
+    if os.path.isdir(SHADERS):
+        for entry in sorted(os.listdir(SHADERS)):
+            if not entry.endswith(".glsl"):
+                continue
+            path = os.path.join(SHADERS, entry)
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            edits = 0
+            for i, line in enumerate(lines):
+                m = SEE_THROUGH_LINE.match(line)
+                if m and m.group(2) != want:
+                    lines[i] = m.group(1) + want + m.group(3) + "\n"
+                    edits += 1
+            if edits:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                changed += 1
+    return ("on" if want == "true" else "off") if changed else None
+
+
 def switch(name):
     names = [n for n, _ in presets()]
     if name != "off" and name not in names:
         print(f"No cursor effect named '{name}'. Choose one of: {', '.join(names + ['off'])}")
         return 1
+    if name != "off":
+        see = sync_see_through()
+        if see:
+            print(f"See-through window support: {see} (Ghostty's background-opacity is {'below 1' if see == 'on' else '1'})")
     with open(CONFIG, encoding="utf-8") as f:
         lines = f.readlines()
     before = active(lines) or "off"
@@ -2580,6 +2633,10 @@ def main(argv):
         return 1
     if len(argv) == 1:
         return list_effects()
+    if argv[1] == "_see-through":  # install.sh, after copying the shaders
+        if sync_see_through() == "on":
+            print("See-through window support: on (Ghostty's background-opacity is below 1).")
+        return 0
     if argv[1] == "toggle":
         return toggle()
     if argv[1] in FLAGS:

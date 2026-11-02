@@ -18,6 +18,10 @@
 // otherwise the effect plays upside down.
 #define Y_DOWN true
 
+// A translucent window (background-opacity below 1): `cursor-fx` sets this from your Ghostty
+// config when you switch effects, and install.sh on install. Off, its code costs nothing.
+#define SEE_THROUGH false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT      = true;  // a short thruster burst fires behind the cursor as you type
@@ -77,7 +81,11 @@ const vec3  THRUST_COLOR   = vec3(0.62, 0.84, 1.0);  // the thrusters' exhaust
 
 // The terminal's color at uv (0 to 1, y-up).
 vec4 screenAt(vec2 uv) {
-    return texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
+    vec4 c = texture(iChannel0, Y_DOWN ? vec2(uv.x, 1.0 - uv.y) : uv);
+    // A translucent window: Ghostty hands the screen over premultiplied, so the background
+    // would never match iBackgroundColor. mainImage() multiplies again at the end.
+    if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
+    return c;
 }
 
 // A cursor rectangle with .xy its top-left corner in y-up pixels. Ghostty gives
@@ -778,7 +786,7 @@ vec3 linesLook(vec2 p, vec3 col) {
     return SUBTLE ? mix(col, lit, 0.45) : lit;  // subtle: the moving look at under half (the line color stays)
 }
 
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+void effectImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
@@ -790,4 +798,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (iFocus != 0 && CURSOR_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(cursorLook(fragCoord, fragColor.rgb, res), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.45) : lit; }
     if (PROMPT_EFFECT && iCurrentCursorStyle == CURSORSTYLE_BLOCK) { vec3 lit = min(promptLook(fragCoord, fragColor.rgb), vec3(1.0)); fragColor.rgb = SUBTLE ? mix(fragColor.rgb, lit, 0.6) : lit; }
+}
+
+// Everything above works on the screen without a translucent window's transparency (see
+// screenAt()); the window wants it back.
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    effectImage(fragColor, fragCoord);
+    if (SEE_THROUGH && fragColor.a < 1.0) fragColor.rgb *= fragColor.a;
 }

@@ -68,6 +68,9 @@ redrawing the screen never set anything off.
 - **pi** needs "Show hardware cursor" on. Without it Ghostty sees no cursor: no cursor look,
   typing or done effects, and Enter plays where the cursor was last seen. The pi signals are
   checked with pi 1.4.0; the effects in pi are not yet checked in Ghostty.
+- **See-through windows** (`background-opacity` below 1) work: `cursor-fx` turns the shaders'
+  see-through support on when you pick an effect, and off in an opaque window, where it costs
+  nothing. After changing `background-opacity`, run `cursor-fx <effect>` once. Checked on macOS.
 - **bash and fish**: only the zsh hook ships; the README's snippets for other shells are untested.
 - **Battery**: while any animated effect is on, Ghostty redraws the focused window continuously.
   `cursor-fx idle off` makes the screen calmer; `cursor-fx off` is the only real saver.
