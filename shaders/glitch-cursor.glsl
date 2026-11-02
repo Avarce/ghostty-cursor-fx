@@ -809,14 +809,39 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
     fragColor = vec4(col, fragColor.a);
 }
 
-// Effects stay in the pane the input box is in: a pixel counts when the box line under the cursor
-// runs unbroken from the cursor's column to it. With no box in sight (a shell) nothing is limited.
-// Only pixels an effect changed get here, so the walk costs nothing on the rest of the screen.
-bool inBoxPane(float x, vec2 res) {
+// A pane's edge drawn by a terminal multiplexer: herdr's sidebar separator, a herdr or tmux pane
+// border. Its cell (left edge `left`, `w` wide) is ink without a break from the bottom of the
+// cursor's row, across the gap above that row that letters never reach, into the lower half of the
+// row above (where a pane's top corner ┌ already runs down). A box-drawing │ or a colored cell is.
+// Ghostty draws │ one to three pixels wide in the cell's middle, always over pixel (w - 1) / 2, so
+// one column of samples does. The gap first: a cell of text is done after one sample.
+bool paneWall(float left, float w, vec4 cur, vec2 res) {
+    float x = floor(left) + floor(0.5 * (w - 1.0)) + 0.5, stepY = max(1.0, floor(cur.w / 24.0));
+    if (colorDist(screenAt(vec2(x, cur.y) / res).rgb, iBackgroundColor) < 0.03) return false;
+    for (float y = cur.y + 0.4 * cur.w; y >= cur.y - cur.w; y -= stepY) {
+        if (y < 0.0 || y > res.y) continue;
+        if (colorDist(screenAt(vec2(x, y) / res).rgb, iBackgroundColor) < 0.03) return false;
+    }
+    return true;
+}
+
+// Effects stay in the cursor's pane. With the input box in sight, a pixel counts when the box line
+// under the cursor runs unbroken from the cursor's column to it. With none (a shell), when no pane
+// edge lies between them: next to herdr's sidebar or in a split, the Enter line would run across the
+// other panes. Only pixels an effect changed get here, so the walk costs nothing on the rest of the
+// screen.
+bool inCursorPane(float x, vec2 res) {
     vec4 cur = upCursor(iCurrentCursor);
     float y = clLineNear(cur.y - 1.7 * cur.w, 0.7 * cur.w, res);
-    if (y < 0.0) return true;
     float from = boxColumnX(), step1 = cellWOf(cur), dir = x < from ? -1.0 : 1.0;
+    if (y < 0.0) {
+        for (int i = 1; i < 400; i++) {
+            float at = from + dir * float(i) * step1;
+            if (dir * (at - x) > 0.5 * step1) return true;  // past the pixel's own cell
+            if (paneWall(at - 0.5 * step1, step1, cur, res)) return false;
+        }
+        return true;
+    }
     vec3 ink = screenAt(vec2(from, y) / res).rgb;
     for (int i = 1; i < 400; i++) {
         float at = from + dir * float(i) * step1;
@@ -830,7 +855,7 @@ bool inBoxPane(float x, vec2 res) {
 void paneEffects(inout vec4 fragColor, vec2 fragCoord) {
     vec3 before = fragColor.rgb;
     effects(fragColor, fragCoord);
-    if (fragColor.rgb != before && !inBoxPane(fragCoord.x, iResolution.xy)) fragColor.rgb = before;
+    if (fragColor.rgb != before && !inCursorPane(fragCoord.x, iResolution.xy)) fragColor.rgb = before;
 }
 
 void effectImage(out vec4 fragColor, in vec2 fragCoord) {

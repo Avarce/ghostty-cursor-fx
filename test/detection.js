@@ -87,6 +87,44 @@
     out.shell.textLit = Math.max(out.shell.textLit, text);
     out.shell.underLit = Math.max(out.shell.underLit, under);
   }
+  // A shell in a herdr pane: the sidebar left of it ends in a separator (│ top to bottom), a split
+  // border right of it. Enter and done stay between the two, with the prompt's own line or without
+  // one (the line under the sent row then), the cursor on the new prompt or at the pane's left edge.
+  const L = 10, R = 46, pad = s => ' '.repeat(L) + s;
+  const herdrRule = { row: 4, from: L + 16, to: R - 2 };
+  const outsidePane = (a, b) => {
+    let n = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (x >= PADX + L * CW && x < PADX + (R - 1) * CW) continue;
+      const i = (y * W + x) * 4;
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 6) n++;
+    }
+    return n;
+  };
+  // Also with 1 px wide edges, and in a bordered pane with the cursor on its first row (the edges
+  // start in the middle of the border row above, at its corners ┌ ┐).
+  out.herdr = { lit: 1e9, spill: 0 };
+  const thin = [{ col: L - 1, px: 1 }, { col: R - 1, px: 1 }];
+  const bordered = [{ col: L - 1, fromRow: 4 }, { col: R - 1, fromRow: 4 }];
+  for (const screen of [
+    { rows: prompt.map(pad), short: herdrRule, cur: { row: 5, col: L + 12 } },
+    { rows: prompt.map(pad), short: herdrRule, cur: { row: 6, col: L } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls')], cur: { row: 5, col: L } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls'), pad('~/tmp $ ')], cur: { row: 5, col: L + 8 } },
+    { rows: ['', '', '', '', pad('~/tmp $ ls'), pad('~/tmp $ ')], cur: { row: 5, col: L + 8 }, walls: thin },
+    { rows: ['', '', '', '', '', pad('~/tmp $ ')], short: { row: 4, from: L - 1, to: R }, cur: { row: 5, col: L + 8 }, walls: bordered },
+  ]) {
+    screen.pane = [L, R - 1];
+    screen.walls ??= [L - 1, R - 1];
+    let lit = 0;
+    for (const signal of ['enter', 'done']) for (const since of [0.06, 0.12, 0.25, 0.4, 0.6]) {
+      const off = render(T0 + since, T0, { screen });
+      const on = render(T0 + since, T0, { screen, signal });
+      out.herdr.spill = Math.max(out.herdr.spill, outsidePane(off, on));
+      lit = Math.max(lit, changed(off, on, [3, 4, 5, 6, 7], [L, R - 1]).inside);
+    }
+    out.herdr.lit = Math.min(out.herdr.lit, lit);
+  }
   // A hash of a few frames, to compare a shader's output between two versions of it.
   let hash = 2166136261;
   for (const [t, signal] of [[50, null], [0.25, 'enter'], [0.25, 'done']]) {

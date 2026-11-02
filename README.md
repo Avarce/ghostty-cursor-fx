@@ -59,7 +59,13 @@ redrawing the screen never set anything off.
   Code's line grey on dark grey, black, Dracula and Solarized Dark backgrounds.
 - **Splits and the done effect**: done starts at the window's edges, not the pane's, so in a
   split it reaches the pane a moment later (mecha's clash stays at the window's middle). In a
-  plain shell there is no box line to measure, so Enter under the sent line spans the window.
+  plain shell there is no box line to measure, so effects stop at the nearest pane edge left and
+  right of the cursor instead: a cell that is ink without a break from the cursor's row up into
+  the row above (herdr's sidebar separator, a herdr or tmux pane border). Without one, Enter
+  under the sent line spans the window. herdr draws its separator in the theme's `surface_dim`;
+  with herdr's catppuccin theme on Ghostty's Catppuccin Mocha that is the background color
+  itself, which hides the separator from the shader too. Give `surface_dim` a color of its own in
+  herdr's `[theme.custom.dark]` to keep effects off the sidebar.
   A prompt that draws a line of its own after its text (starship's `$fill`, at least 12 cells long, one or
   two rows above the cursor) gets the effect on that line instead; only neon keeps it off the prompt's text.
 - **A prompt that wraps over several rows**: aurora, cyber, embers, fireworks, hologram, mecha and
@@ -212,7 +218,8 @@ screen with Ghostty's uniforms: run `python3 -m http.server` in this folder and
 open `http://localhost:8000/test/index.html?shader=../shaders/lightning-cursor.glsl&color=9fd0fe`; `tests.js`,
 `tests2.js` and `tests3.js` hold the checks used while building the effects.
 `test/run_detection.py` runs `test/detection.js` for every shader in headless Chrome: the input
-box in a whole window, next to a sidebar and in splits, and an underline that must not count.
+box in a whole window, next to a sidebar and in splits, an underline that must not count, and a
+shell in a herdr pane between its sidebar separator and a split border.
 `--bg eff1f5 --fg 5c5f77` runs them on a light theme, `--opacity 0.85 --linear 0` in a translucent window as on macOS,
 `--hashes` prints a hash of the frames to compare two versions.
 `sync-from-ghostty.sh` copies your live, tuned files back into this folder.
