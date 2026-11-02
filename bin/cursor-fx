@@ -56,8 +56,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 VERSION = "1.1.0"
-CONFIG = os.environ.get("CURSOR_FX_CONFIG") or os.path.join(
-    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "ghostty", "config")
+
+def find_config():
+    """The Ghostty config file: the first existing config or config.ghostty in the Ghostty folder
+    under $XDG_CONFIG_HOME (default ~/.config) or in Ghostty's macOS folder. Symlinks are resolved,
+    so the presets and shaders sit next to the real file."""
+    xdg = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "ghostty")
+    mac = os.path.expanduser("~/Library/Application Support/com.mitchellh.ghostty")
+    for folder in (xdg, mac):
+        for name in ("config", "config.ghostty"):
+            if os.path.exists(os.path.join(folder, name)):
+                return os.path.realpath(os.path.join(folder, name))
+    return os.path.join(xdg, "config")
+
+
+CONFIG = os.environ.get("CURSOR_FX_CONFIG") or find_config()
 PRESETS = os.path.join(os.path.dirname(CONFIG), "cursor-effects")
 THEMES = os.path.join(os.path.dirname(CONFIG), "themes")
 SAVEPOINTS = os.environ.get("CURSOR_FX_SAVEPOINTS", os.path.expanduser("~/ghostty-savepoints"))
@@ -2558,6 +2571,9 @@ def main(argv):
             return signal_enter(argv)
         except Exception:  # a hook must never fail loudly
             return 0
+    if len(argv) > 1 and argv[1] == "config-path":
+        print(CONFIG)
+        return 0
     if not os.path.isfile(CONFIG):
         print(f"Ghostty config not found: {CONFIG}")
         return 1

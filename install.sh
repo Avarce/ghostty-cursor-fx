@@ -4,12 +4,13 @@
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "$0")" && pwd)"
-config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ghostty"
 bin_dir="$HOME/.local/bin"
 backup="$HOME/ghostty-savepoints/$(date +%Y%m%d-%H%M%S)-before-install"
 
 command -v python3 >/dev/null || { echo "python3 is needed for cursor-fx."; exit 1; }
-[ -d "$config_dir" ] || { echo "No Ghostty config directory at $config_dir. Start Ghostty once, then run this again."; exit 1; }
+config_file="$(python3 "$here/bin/cursor-fx" config-path)"
+[ -f "$config_file" ] || { echo "No Ghostty config at $config_file. Start Ghostty once, then run this again."; exit 1; }
+config_dir="$(dirname "$config_file")"
 
 # Ghostty hands shaders y-down pixels on macOS (Metal), y-up on Linux (OpenGL).
 y_down=false; [ "$(uname -s)" = Darwin ] && y_down=true
