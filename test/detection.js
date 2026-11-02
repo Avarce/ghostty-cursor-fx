@@ -125,6 +125,24 @@
     }
     out.herdr.lit = Math.min(out.herdr.lit, lit);
   }
+  // Enter in a shell with no prompt line, the cursor already at the start of the next row: the
+  // effect goes to the sent row, at the window's left edge and at a herdr pane's left edge alike.
+  // Changed pixels around the bottom of the sent row and of the cursor's row, right of the text.
+  out.leftEdge = {};
+  for (const [name, screen] of Object.entries({
+    window: { rows: ['', '', '', '', '~/tmp $ ls'], cur: { row: 5, col: 0 } },
+    herdr: { rows: ['', '', '', '', pad('~/tmp $ ls')], cur: { row: 5, col: L }, pane: [L, R - 1], walls: [L - 1, R - 1] },
+  })) {
+    const x0 = screen.cur.col + 14, x1 = screen.cur.col + 30;
+    let sent = 0, below = 0;
+    for (const since of [0.06, 0.12, 0.25, 0.4]) {
+      const off = render(T0 + since, T0, { screen });
+      const on = render(T0 + since, T0, { screen, signal: 'enter' });
+      sent = Math.max(sent, strip(off, on, 4, CH / 2, CH + CH / 2, x0, x1));
+      below = Math.max(below, strip(off, on, 5, CH / 2, CH + CH / 2, x0, x1));
+    }
+    out.leftEdge[name] = { sent, below };
+  }
   // A hash of a few frames, to compare a shader's output between two versions of it.
   let hash = 2166136261;
   for (const [t, signal] of [[50, null], [0.25, 'enter'], [0.25, 'done']]) {

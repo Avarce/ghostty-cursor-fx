@@ -27,7 +27,7 @@ def run(url, profile):
 def verdict(r, name):
     if "failed" in r:
         return [r["failed"][:200]]
-    cases = {k: v for k, v in r.items() if k not in ("underline", "hash", "shell", "herdr")}
+    cases = {k: v for k, v in r.items() if k not in ("underline", "hash", "shell", "herdr", "leftEdge")}
     bad = [f"{k}: not found" for k, v in cases.items() if not v["found"]]
     bad += [f"{k}: Enter did not light the lines ({v['lit']}px)" for k, v in cases.items() if v["lit"] < LIT]
     bad += [f"{k}: spills out of the pane ({v['spill']}px)" for k, v in cases.items() if v["spill"] > 40]
@@ -40,6 +40,10 @@ def verdict(r, name):
         bad.append(f"herdr pane: Enter or done spills over the sidebar or the split ({r['herdr']['spill']}px)")
     if r["herdr"]["lit"] < LIT:
         bad.append(f"herdr pane: Enter or done lit nothing in the pane ({r['herdr']['lit']}px)")
+    # Wherever the window's case puts the effect (the sent row or the cursor's), the pane's must too.
+    w, h = r["leftEdge"]["window"], r["leftEdge"]["herdr"]
+    if (w["sent"] > w["below"]) != (h["sent"] > h["below"]):
+        bad.append(f"herdr pane: Enter at the pane's left edge plays on another row than at the window's ({r['leftEdge']})")
     return bad
 
 
@@ -78,13 +82,13 @@ def main():
                 r = run(url, pathlib.Path(tmp) / "profile")
                 bad = verdict(r, f.stem)
                 failed += bool(bad)
-                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k not in ("underline", "hash", "shell", "herdr")) if "failed" not in r else ""
+                nums = " ".join(f"{k}:{v['lit']}/{v['spill']}" for k, v in r.items() if k not in ("underline", "hash", "shell", "herdr", "leftEdge")) if "failed" not in r else ""
                 if args.hashes and "hash" in r:
                     nums = f"hash={r['hash']} dark={r['window']['darkShare']} {nums}"
                 if "shell" in r:
                     nums += f" shell:{r['shell']['ruleLit']}/text {r['shell']['textLit']}/under {r['shell']['underLit']}"
                 if "herdr" in r:
-                    nums += f" herdr:{r['herdr']['lit']}/{r['herdr']['spill']}"
+                    nums += f" herdr:{r['herdr']['lit']}/{r['herdr']['spill']} edge:" + "/".join(f"{v['sent']}:{v['below']}" for v in r["leftEdge"].values())
                 print(f"{'FAIL' if bad else 'ok  '} {f.stem:20} {nums}")
                 for b in bad:
                     print(f"       {b}")

@@ -216,6 +216,9 @@ bool doneSignal(bool back) {
         && (!oddByte(iPreviousCursorColor.g) || signalFlipped() || back);
 }
 
+// paneWall() is further down, with the pane checks.
+bool paneWall(float left, float w, vec4 cur, vec2 res);
+
 // The height of the line that was just sent. Claude Code shows a sent prompt in
 // the chat above the input box on a lighter bar across the whole width, so look
 // up to 12 rows above the cursor for a row whose right end is off the background
@@ -231,7 +234,9 @@ float sentRowY(vec4 cur, float cellW, vec2 res) {
         vec3 b = screenAt(vec2(x, rowLo + 0.8 * cur.w) / res).rgb;
         if (colorDist(a, iBackgroundColor) > 0.012 && colorDist(b, iBackgroundColor) > 0.012) return rowLo + 0.5 * cur.w;
     }
-    return cur.x <= 1.5 * cellW ? cur.y + 0.5 * cur.w : cur.y - 0.5 * cur.w;
+    // At the left edge of the window or of its pane (next to herdr's sidebar, in a split).
+    bool atLeft = cur.x <= 1.5 * cellW || paneWall(cur.x - cellW, cellW, cur, res);
+    return atLeft ? cur.y + 0.5 * cur.w : cur.y - 0.5 * cur.w;
 }
 
 // A shell prompt can draw a line of its own after its text on the first row (starship's $fill). It
