@@ -89,8 +89,9 @@ Clone this repository (or download it as a ZIP from the green **Code** button), 
 ./install.sh
 ```
 
-This copies `shaders/` and `cursor-effects/` into your Ghostty config directory and
-`cursor-fx` into `~/.local/bin`, backing up anything it replaces. Then:
+This copies `shaders/` and `cursor-effects/` next to your Ghostty config (found in Ghostty's
+config folder or its macOS folder; symlinks are followed), `cursor-fx` into `~/.local/bin`, and
+the pi extension into `~/.pi/agent` when that folder exists. It backs up anything it replaces. Then:
 
 ```sh
 cursor-fx lightning    # pick an effect; Ghostty reloads at once
@@ -113,10 +114,10 @@ green value); the shader reads that as the signal.
 a `UserPromptSubmit` hook for Enter and a `Stop` hook (Claude finished answering)
 for done.
 
-**pi** — copy `hooks/pi-extension.ts` to `~/.pi/agent/extensions/cursor-fx.ts`
-(loaded at start or on `/reload`): Enter when you send a prompt, done when pi has
-finished and won't continue on its own. Also turn on **Show hardware cursor** in
-pi's `/settings`: pi hides the terminal cursor by default, and the effects follow it.
+**pi** — `install.sh` copies `hooks/pi-extension.ts` to `~/.pi/agent/extensions/cursor-fx.ts`
+and sets **Show hardware cursor** (`showHardwareCursor` in `~/.pi/agent/settings.json`), which
+the effects need because pi hides the terminal cursor by default. Run `/reload` in pi. Enter
+fires when you send a prompt; done fires when pi has finished and won't continue on its own.
 
 **zsh** — add `hooks/zsh-hook.zsh` to your `~/.zshrc`: Enter before every command,
 done after any command that took more than 5 seconds. (bash/fish: call
