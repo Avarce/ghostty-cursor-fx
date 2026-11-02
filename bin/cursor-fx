@@ -15,6 +15,9 @@
                        while any effect is on; `cursor-fx off` is the power saver)
   cursor-fx subtle on  the calm version of every effect for all-day use: smaller, dimmer
   cursor-fx subtle off moments and a quieter cursor (edits SUBTLE in every shader and reloads)
+  cursor-fx panes on   Claude Code in herdr or tmux panes: find its input box in the pane and
+  cursor-fx panes off  keep the effects there (costs ~1-1.5 ms a frame; on by itself the first
+                       time you pick an effect inside herdr)
   cursor-fx edit       open the settings panel in your browser: pick the effect, set its
                        cursor color and every setting of its shader with a live preview;
                        changes apply to Ghostty as you make them (--no-open: just print the URL)
@@ -343,9 +346,38 @@ def set_flag(flag, state):
 
 # The switches every shader has that follow your Ghostty config (see sync_switches()), and
 # what they're called with the reason each is on or off.
-SWITCH_LINE = re.compile(r'^(#define\s+(SEE_THROUGH|LIGHT_THEME)\s+)(true|false)\b(.*)$')
+SWITCH_LINE = re.compile(r'^(#define\s+(SEE_THROUGH|LIGHT_THEME|PANES)\s+)(true|false)\b(.*)$')
 SWITCH_NAMES = {"SEE_THROUGH": ("See-through window support", "Ghostty's background-opacity is below 1", "an opaque window"),
-                "LIGHT_THEME": ("Light theme support", "a light background, or a light:/dark: theme pair", "a dark theme")}
+                "LIGHT_THEME": ("Light theme support", "a light background, or a light:/dark: theme pair", "a dark theme"),
+                "PANES": ("Pane support", "herdr, or `cursor-fx panes on`", "`cursor-fx panes on` turns it on for tmux panes")}
+# Pane support's choice, in the Ghostty config: `cursor-fx panes on|off`, or "on" the first time an
+# effect is picked inside herdr (whose sidebar always makes a pane). It never turns itself off.
+PANES_CHOICE = re.compile(r'^\s*#\s*cursor-fx-panes\s*=\s*(on|off)\b')
+
+
+def panes_choice():
+    """"on" or "off" from the config's `# cursor-fx-panes = ...` line, else None."""
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return next((m.group(1) for m in (PANES_CHOICE.match(line) for line in f) if m), None)
+    except OSError:
+        return None
+
+
+def set_panes_choice(state):
+    """Write the config's `# cursor-fx-panes = on|off` line (one, under the effect marker)."""
+    with open(CONFIG, encoding="utf-8") as f:
+        lines = [line for line in f if not PANES_CHOICE.match(line)]
+    line = f"# cursor-fx-panes = {state} (`cursor-fx panes on|off`: Claude Code in herdr or tmux panes)\n"
+    at = next((i for i, l in enumerate(lines) if l.startswith(MARKER)), None)
+    if at is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(line)
+    else:
+        lines.insert(at + 1, line)
+    with open(CONFIG, "w", encoding="utf-8") as f:  # in place, so a symlinked config stays a symlink
+        f.writelines(lines)
 
 
 def ghostty_settings():
@@ -378,7 +410,43 @@ def wanted_switches():
     if m:
         r, g, b = (int(m.group(1)[i:i + 2], 16) / 255 for i in (0, 2, 4))
         light = light or 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
-    return {"SEE_THROUGH": see, "LIGHT_THEME": light}
+    choice = panes_choice()
+    if choice is None and os.environ.get("HERDR_ENV"):
+        set_panes_choice("on")
+        choice = "on"
+    return {"SEE_THROUGH": see, "LIGHT_THEME": light, "PANES": choice == "on"}
+
+
+def set_panes(state):
+    """`cursor-fx panes on|off`: Claude Code in herdr or tmux panes (see PANES in the shaders)."""
+    if state is None:
+        states = set()
+        for path in glob_shaders():
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    m = SWITCH_LINE.match(line)
+                    if m and m.group(2) == "PANES":
+                        states.add(m.group(3))
+        print(f"Pane support: {'on' if 'true' in states else 'off'} (cursor-fx panes on|off; for Claude Code in herdr or tmux panes)")
+        return 0
+    if state not in ("on", "off"):
+        print("Usage: cursor-fx panes on|off")
+        return 1
+    set_panes_choice(state)
+    changed = sync_switches()
+    if not changed:
+        print(f"Pane support: {state} (no shader changed)")
+        return 0
+    report_switches(changed)
+    if reload_ghostty():
+        print("Ghostty reloaded.")
+    else:
+        print("Press Command+Shift+, in Ghostty to apply it.")
+    return 0
+
+
+def glob_shaders():
+    return [os.path.join(SHADERS, e) for e in sorted(os.listdir(SHADERS)) if e.endswith(".glsl")] if os.path.isdir(SHADERS) else []
 
 
 def sync_switches():
@@ -528,12 +596,40 @@ def signal_enter(argv):
         return 0
     name = active(lines) or "off"
     color = (preset_color(name) or "").lstrip("#")
-    if not tty or len(color) != 6:
+    if len(color) != 6:
         return 0
     shader = preset_shader(name)
     if shader and any(s["name"] == ("DONE_EFFECT" if kind == "done" else "ENTER_EFFECT") and s["value"] == "false"
                       for s in shader_settings(shader)):
         return 0  # this effect's Enter (or done) is off: no color change, no timer process
+    for target in outer_ttys() or ([tty] if tty else []):
+        try:
+            send_signal(target, kind, name, color)
+        except OSError:
+            pass  # a terminal that's gone doesn't stop the others
+    return 0
+
+
+def outer_ttys():
+    """The terminals Ghostty itself shows when this runs in a herdr pane: herdr keeps a pane's
+    cursor color to itself, so the signal goes past it, to each herdr client's terminal (with
+    several, only the focused window plays it). Empty outside herdr."""
+    if not os.environ.get("HERDR_ENV"):
+        return []
+    out = subprocess.run(["ps", "-Ao", "tty=,comm="], capture_output=True, text=True).stdout
+    ttys = []
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        # No terminal: "??" on macOS, "?" on Linux, "-" elsewhere. comm is a full path on macOS.
+        if len(parts) == 2 and parts[0] not in ("?", "??", "-") and os.path.basename(parts[1].strip()) == "herdr":
+            tty = "/dev/" + parts[0]
+            if tty not in ttys:
+                ttys.append(tty)
+    return ttys
+
+
+def send_signal(tty, kind, name, color):
+    """Set one terminal's cursor color to the signal color, and start the timer that resets it."""
     r, g, b = int(color[:2], 16), int(color[2:4], 16), int(color[4:], 16)
     g, b = (g & ~1, b | 1) if kind == "enter" else (g | 1, b & ~1)
     os.makedirs(CACHE, exist_ok=True)
@@ -2659,6 +2755,8 @@ def main(argv):
         return 0
     if argv[1] == "toggle":
         return toggle()
+    if argv[1] == "panes":
+        return set_panes(argv[2] if len(argv) > 2 else None)
     if argv[1] in FLAGS:
         return set_flag(argv[1], argv[2] if len(argv) > 2 else None)
     if argv[1] == "edit":

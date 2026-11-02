@@ -52,8 +52,8 @@ redrawing the screen never set anything off.
   width, background 4 px above and below) up to a few rows above and below the cursor. Claude
   Code draws it in grey (rgb 136 or 138), or in your palette's white with its ANSI themes. If
   that line is within about 3 % of your background color, or a Claude Code update redraws the
-  box (lines 8 px or thicker, a sidebar, no lines), Enter plays just under the sent line
-  instead. A full-width horizontal rule from another program right above or below the cursor
+  box (lines 8 px or thicker, no lines), or Claude Code sits in a pane without pane support
+  (below), Enter plays just under the sent line instead. A full-width horizontal rule from another program right above or below the cursor
   lights up like a box line. Checked in the test harness with Claude Code's line grey on dark
   grey, black, Dracula and Solarized Dark backgrounds.
 - **A prompt that wraps over several rows**: aurora, cyber, embers, fireworks, hologram, mecha and
@@ -64,7 +64,15 @@ redrawing the screen never set anything off.
 - **Other programs that set the cursor color** themselves (OSC 12) with an odd blue or green value
   can set off an Enter or done effect; the signals use those lowest bits.
 - **tmux**: the Enter and done signals rely on the cursor color reaching Ghostty; inside tmux that
-  depends on your tmux setup and is untested.
+  depends on your tmux setup and is untested. herdr keeps a pane's cursor color to itself, so in a
+  herdr pane `cursor-fx signal` writes to the herdr client's terminal instead.
+- **Panes inside the terminal** (herdr's sidebar, tmux splits) need pane support: `cursor-fx panes on`
+  (it turns on by itself the first time you pick an effect inside herdr; `cursor-fx panes off`).
+  The input box is then found from the cursor's column (in a pane at least 24 cells wide) and the
+  effects stay in the cursor's pane; a shell's Enter line stops at a pane's border. It costs about
+  1 to 1.5 ms a frame, more during Enter. herdr draws its sidebar separator in its theme's
+  `surface_dim`; if that is your background color, the effects can't see it: give `surface_dim` a
+  color of its own in herdr's `[theme.custom.dark]`. Checked in the test harness, not yet in herdr.
 - **pi** needs "Show hardware cursor" on. Without it Ghostty sees no cursor: no cursor look,
   typing or done effects, and Enter plays where the cursor was last seen. The pi signals are
   checked with pi 1.4.0; the effects in pi are not yet checked in Ghostty.

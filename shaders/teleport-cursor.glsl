@@ -24,6 +24,11 @@
 // you switch effects, and install.sh on install. Off, the light-theme code costs nothing.
 #define LIGHT_THEME false
 
+// Panes drawn inside the terminal (herdr, tmux): `cursor-fx` turns this on when you pick an effect
+// inside one, or with `cursor-fx panes on|off`. The input box is then found from the cursor's
+// column and the effects stay in the cursor's pane. Off, its code costs nothing.
+#define PANES false
+
 // --- settings: the ones worth a tweak (edit and save, or use `cursor-fx edit`; Ghostty reloads on Command+Shift+,) ---
 // -- Typing
 const bool  TYPE_EFFECT    = true;  // a faint sparkle shimmers over the cursor as you type
@@ -142,6 +147,53 @@ vec3 sRGBToLinear(vec3 c) {
 float colorDist(vec3 s, vec3 c) {
     return min(distance(s, c), distance(s, sRGBToLinear(c)));
 }
+// --- Panes (PANES): a box line through the cursor's column ---
+// The input box lines run across the pane Claude Code is in, not across the window: a sidebar
+// or a split (herdr, tmux) can take the rest. With PANES a box line is found from the cursor's
+// column: it passes through that column, is one color for at least BOX_LINE_CELLS cells around
+// it (a zsh underline or a row of text never is) and has background four pixels above and below.
+#define BOX_LINE_CELLS 24.0
+
+float boxColumnX() {
+    vec4 c = upCursor(iCurrentCursor);
+    return c.x + 0.5 * cellWOf(c);
+}
+
+bool onBoxLine(float y, vec2 res) {
+    float w = cellWOf(upCursor(iCurrentCursor)), x = boxColumnX();
+    vec3 ink = screenAt(vec2(x, y) / res).rgb;
+    if (colorDist(ink, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+            || colorDist(screenAt(vec2(x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) return false;
+    float cells = 0.0;
+    for (int side = 0; side < 2; side++) {
+        float dir = side == 0 ? 1.0 : -1.0;
+        for (int i = 1; i <= 12; i++) {
+            float at = x + dir * float(i) * 2.0 * w;
+            if (at < 0.0 || at > res.x || distance(screenAt(vec2(at, y) / res).rgb, ink) > 0.03) break;
+            cells += 2.0;
+        }
+    }
+    return cells >= BOX_LINE_CELLS;
+}
+
+// A box line at height y: with PANES through the cursor's column (above), else across the whole
+// window: ink at five points along it and background four pixels above and below.
+bool boxLineAt(float y, vec2 res) {
+    if (PANES) return onBoxLine(y, res);
+    vec3 xs = vec3(0.45, 0.66, 0.88) * res.x;
+    if (colorDist(screenAt(vec2(xs.x, y) / res).rgb, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(xs.y, y) / res).rgb, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(xs.z, y) / res).rgb, iBackgroundColor) < 0.03) return false;
+    // Claude Code's box lines run across the whole window; a shorter line (zsh's
+    // underline under a path, a rule in some output) is not one.
+    if (colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
+            || colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) return false;
+    if (colorDist(screenAt(vec2(xs.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
+            || colorDist(screenAt(vec2(xs.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) return false;
+    return true;
+}
+
 
 float segDist(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a, ba = b - a;
@@ -190,6 +242,9 @@ bool doneSignal(bool back) {
         && (!oddByte(iPreviousCursorColor.g) || signalFlipped() || back);
 }
 
+// paneWall() is further down, with the pane checks.
+bool paneWall(float left, float w, vec4 cur, vec2 res);
+
 // The height of the line that was just sent. Claude Code shows a sent prompt in
 // the chat above the input box on a lighter bar across the whole width, so look
 // up to 12 rows above the cursor for a row whose right end is off the background
@@ -205,7 +260,9 @@ float sentRowY(vec4 cur, float cellW, vec2 res) {
         vec3 b = screenAt(vec2(x, rowLo + 0.8 * cur.w) / res).rgb;
         if (colorDist(a, iBackgroundColor) > 0.012 && colorDist(b, iBackgroundColor) > 0.012) return rowLo + 0.5 * cur.w;
     }
-    return cur.x <= 1.5 * cellW ? cur.y + 0.5 * cur.w : cur.y - 0.5 * cur.w;
+    // At the left edge of the window, or with PANES of its pane (next to herdr's sidebar, in a split).
+    bool atLeft = cur.x <= 1.5 * cellW || (PANES && paneWall(cur.x - cellW, cellW, cur, res));
+    return atLeft ? cur.y + 0.5 * cur.w : cur.y - 0.5 * cur.w;
 }
 
 // Claude Code draws its input box with a thin grey line across the whole width
@@ -216,22 +273,13 @@ float sentRowY(vec4 cur, float cellW, vec2 res) {
 // and 1.6 rows below it (the status lines never count). Returns its height, or -1.
 float boxLineY(vec2 p, vec2 center, vec4 cur, vec2 res, float reach) {
     float stepPx = max(1.0, reach / 40.0);
-    vec3 xs = vec3(0.45, 0.66, 0.88) * res.x;
     for (int i = 0; i < 80; i++) {
         float dy = floor(float(i) * 0.5) * stepPx * (mod(float(i), 2.0) < 0.5 ? 1.0 : -1.0);
         if (abs(dy) > reach) break;
         float y = p.y + dy;
         if (y < 0.0 || y > res.y || y - center.y > 4.0 * cur.w || center.y - y > 1.6 * cur.w
                 || (y > cur.y - cur.w && y < cur.y)) continue;
-        if (colorDist(screenAt(vec2(xs.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.y, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.z, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        // Claude Code's box lines run across the whole window; a shorter line (zsh's
-        // underline under a path, a rule in some output) is not one.
-        if (colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        if (colorDist(screenAt(vec2(xs.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
-                || colorDist(screenAt(vec2(xs.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        if (!boxLineAt(y, res)) continue;
         return y;
     }
     return -1.0;
@@ -442,7 +490,7 @@ vec2 clMarkAbove(vec4 cur, vec2 res) {
     for (int i = 0; i < 400; i++) {
         float y = cur.y + 1.0 + float(i) * stepY;
         if (y > cur.y + 10.0 * h || y > res.y) break;
-        if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (colorDist(screenAt(vec2(PANES ? boxColumnX() : 0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
         lineY = clLineNear(y, 1.0, res);
         if (lineY >= 0.0) break;
     }
@@ -512,9 +560,10 @@ vec3 promptLook(vec2 p, vec3 col) {
         for (int i = 0; i < 100; i++) {
             float y = p.y + float(i) * stepY;
             if (y > p.y + 2.2 * h || y > res.y) break;
-            if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) > 0.03
+            if (PANES ? onBoxLine(y, res)
+                    : (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) > 0.03
                     && colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) > 0.03
-                    && colorDist(screenAt(vec2(0.5 * res.x, y) / res).rgb, iBackgroundColor) > 0.03) { under = true; break; }
+                    && colorDist(screenAt(vec2(0.5 * res.x, y) / res).rgb, iBackgroundColor) > 0.03)) { under = true; break; }
         }
         if (!under) return col;
         m = clMarkAbove(cur, res);
@@ -543,20 +592,11 @@ vec3 promptLook(vec2 p, vec3 col) {
 // the window and background four pixels above and below it (like boxLineY()).
 // Returns its height, or -1.
 float clLineNear(float y0, float reach, vec2 res) {
-    vec3 xs = vec3(0.45, 0.66, 0.88) * res.x;
     for (int i = 0; i < 81; i++) {
         float off = float((i + 1) / 2) * (i % 2 == 0 ? 1.0 : -1.0);
         if (abs(off) > reach) break;
         float y = floor(y0) + 0.5 + off;
-        if (colorDist(screenAt(vec2(xs.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.y, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(xs.z, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        // Claude Code's box lines run across the whole window; a shorter line (zsh's
-        // underline under a path, a rule in some output) is not one.
-        if (colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
-                || colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
-        if (colorDist(screenAt(vec2(xs.x, y + 4.0) / res).rgb, iBackgroundColor) > 0.03
-                || colorDist(screenAt(vec2(xs.x, y - 4.0) / res).rgb, iBackgroundColor) > 0.03) continue;
+        if (!boxLineAt(y, res)) continue;
         return y;
     }
     return -1.0;
@@ -570,6 +610,10 @@ bool clLineBetween(float y0, float y1, vec2 res) {
     for (int i = 0; i < 2400; i++) {
         float y = floor(y0) + 0.5 + float(i);
         if (y >= y1) break;
+        if (PANES) {
+            if (onBoxLine(y, res)) return true;
+            continue;
+        }
         if (colorDist(screenAt(vec2(0.95 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
                 || colorDist(screenAt(vec2(0.05 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
                 || colorDist(screenAt(vec2(0.45 * res.x, y) / res).rgb, iBackgroundColor) < 0.03
@@ -626,7 +670,8 @@ vec3 linesLook(vec2 p, vec3 col) {
         // reads are the same for every pixel of the row, so they cost next to nothing.
         vec3 bgT = screenAt(vec2(1.5) / iResolution.xy).rgb;  // the corner: background, as the texture holds it
         float v = p.y / iResolution.y, d4 = 4.0 / iResolution.y;
-        if (distance(screenAt(vec2(0.95, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.05, v)).rgb, bgT) < 0.02
+        if (PANES ? !onBoxLine(p.y, iResolution.xy)
+                : distance(screenAt(vec2(0.95, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.05, v)).rgb, bgT) < 0.02
                 || distance(screenAt(vec2(0.45, v)).rgb, bgT) < 0.02 || distance(screenAt(vec2(0.66, v)).rgb, bgT) < 0.02
                 || distance(screenAt(vec2(0.88, v)).rgb, bgT) < 0.02
                 || distance(screenAt(vec2(0.95, v + d4)).rgb, bgT) > 0.02 || distance(screenAt(vec2(0.95, v - d4)).rgb, bgT) > 0.02
@@ -637,10 +682,12 @@ vec3 linesLook(vec2 p, vec3 col) {
     // With only the line color (no LINE_EFFECT light), background pixels have nothing to do.
     if ((!look || far) && colorDist(screenAt(p / res).rgb, iBackgroundColor) < 0.02) return col;
     // ...nor do pixels whose row isn't a line across the window (cheap, before the search).
-    if ((!look || far) && (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
-            || colorDist(screenAt(vec2(0.95 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02)) return col;
+    if ((!look || far) && (PANES ? colorDist(screenAt(vec2(boxColumnX(), p.y) / res).rgb, iBackgroundColor) < 0.02
+            : (colorDist(screenAt(vec2(0.05 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02
+            || colorDist(screenAt(vec2(0.95 * res.x, p.y) / res).rgb, iBackgroundColor) < 0.02))) return col;
     float lineY = clLineNear(p.y, far ? 2.0 : 0.2 * h, res);
-    if (lineY < 0.0) return col;
+    // With PANES the line can end before the window does: no look past its end.
+    if (lineY < 0.0 || (PANES && colorDist(screenAt(vec2(p.x, lineY) / res).rgb, iBackgroundColor) < 0.03)) return col;
     // Only inside an input box: there is a box line just below the cursor too (a
     // shell, or a program with a long rule somewhere, stays plain).
     if (clLineNear(cur.y - 1.7 * h, 0.7 * h, res) < 0.0) return col;
@@ -756,12 +803,62 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
     fragColor = vec4(min(col, vec3(1.0)), fragColor.a);
 }
 
+// A pane's edge drawn by a terminal multiplexer: herdr's sidebar separator, a herdr or tmux pane
+// border. Its cell (left edge `left`, `w` wide) is ink without a break from the bottom of the
+// cursor's row, across the gap above that row that letters never reach, into the lower half of the
+// row above (where a pane's top corner already runs down). A box-drawing line or a colored cell is.
+// Ghostty draws a vertical line one to three pixels wide in the cell's middle, always over pixel
+// (w - 1) / 2, so one column of samples does. The gap first: a cell of text is done after one sample.
+bool paneWall(float left, float w, vec4 cur, vec2 res) {
+    // The background as the texture holds it (the window's corner): a dark border can be within
+    // colorDist()'s reach of the background's color in the other color space.
+    vec3 bgT = screenAt(vec2(1.5) / res).rgb;
+    float x = floor(left) + floor(0.5 * (w - 1.0)) + 0.5, stepY = max(1.0, floor(cur.w / 24.0));
+    if (distance(screenAt(vec2(x, cur.y) / res).rgb, bgT) < 0.03) return false;
+    for (float y = cur.y + 0.4 * cur.w; y >= cur.y - cur.w; y -= stepY) {
+        if (y < 0.0 || y > res.y) continue;
+        if (distance(screenAt(vec2(x, y) / res).rgb, bgT) < 0.03) return false;
+    }
+    return true;
+}
+
+// With PANES the effects stay in the cursor's pane. With the input box in sight, a pixel counts
+// when the box line under the cursor runs unbroken from the cursor's column to it. With none (a
+// shell), when no pane edge lies between them. Only pixels an effect changed get here.
+bool inCursorPane(float x, vec2 res) {
+    vec4 cur = upCursor(iCurrentCursor);
+    float y = clLineNear(cur.y - 1.7 * cur.w, 0.7 * cur.w, res);
+    float from = boxColumnX(), step1 = cellWOf(cur), dir = x < from ? -1.0 : 1.0;
+    if (y < 0.0) {
+        for (int i = 1; i < 400; i++) {
+            float at = from + dir * float(i) * step1;
+            if (dir * (at - x) > 0.5 * step1) return true;  // past the pixel's own cell
+            if (paneWall(at - 0.5 * step1, step1, cur, res)) return false;
+        }
+        return true;
+    }
+    vec3 ink = screenAt(vec2(from, y) / res).rgb;
+    for (int i = 1; i < 400; i++) {
+        float at = from + dir * float(i) * step1;
+        if (dir * (at - x) >= 0.0) at = x;
+        if (distance(screenAt(vec2(at, y) / res).rgb, ink) > 0.03) return false;
+        if (at == x) return true;
+    }
+    return true;
+}
+
+void paneEffects(inout vec4 fragColor, vec2 fragCoord) {
+    vec3 before = fragColor.rgb;
+    effects(fragColor, fragCoord);
+    if (PANES && fragColor.rgb != before && !inCursorPane(fragCoord.x, iResolution.xy)) fragColor.rgb = before;
+}
+
 void effectImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 res = iResolution.xy;
     if (Y_DOWN) fragCoord.y = res.y - fragCoord.y;
     fragColor = screenAt(fragCoord / res);
     vec3 under = fragColor.rgb;  // the screen before the moments (the subtle version mixes back to it)
-    effects(fragColor, fragCoord);
+    paneEffects(fragColor, fragCoord);
     if (SUBTLE) fragColor.rgb = mix(under, fragColor.rgb, 0.55);
     // The line color stays when the window loses focus; the moving looks don't.
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCursorVisible != 0 && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));

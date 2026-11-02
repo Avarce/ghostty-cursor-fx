@@ -37,7 +37,7 @@ fi
 cp -p "$here/bin/cursor-fx" "$bin_dir/cursor-fx"
 chmod +x "$bin_dir/cursor-fx"
 python3 "$bin_dir/cursor-fx" _keep-apply "$tmp/yours.json" "$here"
-python3 "$bin_dir/cursor-fx" _switches  # see-through windows and light themes, from your Ghostty config
+python3 "$bin_dir/cursor-fx" _switches  # see-through windows, light themes and panes, from your setup
 
 pi_dir="$HOME/.pi/agent"
 if [ -d "$pi_dir" ]; then
