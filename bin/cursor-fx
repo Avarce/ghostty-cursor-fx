@@ -61,17 +61,21 @@ from urllib.parse import parse_qs, urlparse
 
 VERSION = "1.2.0"
 
+def ghostty_folders():
+    """The folders Ghostty reads its config from: under $XDG_CONFIG_HOME (default ~/.config) and macOS's."""
+    return (os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "ghostty"),
+            os.path.expanduser("~/Library/Application Support/com.mitchellh.ghostty"))
+
+
 def find_config():
-    """The Ghostty config file: the first existing config or config.ghostty in the Ghostty folder
-    under $XDG_CONFIG_HOME (default ~/.config) or in Ghostty's macOS folder. Symlinks are resolved,
-    so the presets and shaders sit next to the real file."""
-    xdg = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "ghostty")
-    mac = os.path.expanduser("~/Library/Application Support/com.mitchellh.ghostty")
-    for folder in (xdg, mac):
+    """The Ghostty config file: the first existing config or config.ghostty in the Ghostty folders.
+    Symlinks are resolved, so the presets and shaders sit next to the real file."""
+    folders = ghostty_folders()
+    for folder in folders:
         for name in ("config", "config.ghostty"):
             if os.path.exists(os.path.join(folder, name)):
                 return os.path.realpath(os.path.join(folder, name))
-    return os.path.join(xdg, "config")
+    return os.path.join(folders[0], "config")
 
 
 CONFIG = os.environ.get("CURSOR_FX_CONFIG") or find_config()
@@ -382,8 +386,12 @@ def set_panes_choice(state):
 
 def ghostty_settings():
     """The config Ghostty itself loads, as a dict (`ghostty +show-config`: included files and the
-    theme's colors count too); with CURSOR_FX_CONFIG, that file's own lines."""
-    if "CURSOR_FX_CONFIG" in os.environ or not GHOSTTY:
+    theme's colors count too). A CURSOR_FX_CONFIG outside Ghostty's folders is a sandbox: that file's
+    own lines. One inside them is a local include of the real config: it alone holds no theme or
+    opacity, and reading only it would turn the light-theme and see-through code off."""
+    folder = os.path.dirname(os.path.realpath(CONFIG))
+    sandbox = "CURSOR_FX_CONFIG" in os.environ and folder not in map(os.path.realpath, ghostty_folders())
+    if sandbox or not GHOSTTY:
         return settings(CONFIG)
     try:
         out = subprocess.run([GHOSTTY, "+show-config"], capture_output=True, text=True, timeout=10).stdout
