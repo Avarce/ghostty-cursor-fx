@@ -59,7 +59,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 def find_config():
     """The Ghostty config file: the first existing config or config.ghostty in the Ghostty folder
