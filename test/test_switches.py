@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "cursor-fx")
@@ -56,6 +57,15 @@ class Switches(unittest.TestCase):
         want = self.wanted(os.path.join(self.root, "sandbox.conf"))
         self.assertFalse(want["LIGHT_THEME"])
         self.assertFalse(want["SEE_THROUGH"])
+
+    def test_include_reloads_ghostty_and_a_sandbox_does_not(self):
+        for config, reloads in ((os.path.join(self.folder, "cursor-fx.conf"), True), (os.path.join(self.root, "sandbox.conf"), False)):
+            tool = load_tool(config)
+            tool.ghostty_pids = lambda: [4242]
+            sent = []
+            with mock.patch.object(tool.os, "kill", lambda pid, sig: sent.append(pid)):
+                self.assertEqual(tool.reload_ghostty(), reloads)
+            self.assertEqual(sent, [4242] if reloads else [])
 
 
 if __name__ == "__main__":

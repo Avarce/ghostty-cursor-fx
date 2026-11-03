@@ -37,8 +37,10 @@ config or config.ghostty in $XDG_CONFIG_HOME/ghostty (~/.config/ghostty), then i
 Ghostty's macOS folder, with symlinks followed to the real file; both the macOS app
 and the Linux GTK app reload on SIGUSR2.
 
-Test hooks: CURSOR_FX_CONFIG (config path; also skips the reload, since the running
-Ghostty doesn't read that file), CURSOR_FX_SAVEPOINTS, CURSOR_FX_TTY.
+Test hooks: CURSOR_FX_CONFIG (config path; outside Ghostty's config folders a sandbox:
+only that file's own settings and no reload, since the running Ghostty doesn't read it;
+inside them a local include of the real config, e.g. for a config kept in dotfiles),
+CURSOR_FX_SAVEPOINTS, CURSOR_FX_TTY.
 """
 import contextlib
 import hashlib
@@ -79,6 +81,15 @@ def find_config():
 
 
 CONFIG = os.environ.get("CURSOR_FX_CONFIG") or find_config()
+
+
+def sandboxed():
+    """A CURSOR_FX_CONFIG outside Ghostty's folders is a test sandbox, which the running Ghostty never
+    reads. One inside them is a local include of the real config, which it does read."""
+    folder = os.path.dirname(os.path.realpath(CONFIG))
+    return "CURSOR_FX_CONFIG" in os.environ and folder not in map(os.path.realpath, ghostty_folders())
+
+
 PRESETS = os.path.join(os.path.dirname(CONFIG), "cursor-effects")
 THEMES = os.path.join(os.path.dirname(CONFIG), "themes")
 SAVEPOINTS = os.environ.get("CURSOR_FX_SAVEPOINTS", os.path.expanduser("~/ghostty-savepoints"))
@@ -260,7 +271,7 @@ def ghostty_pids():
 
 def reload_ghostty():
     """Ask Ghostty to reload its config (it handles SIGUSR2 like Command+Shift+,)."""
-    if "CURSOR_FX_CONFIG" in os.environ:
+    if sandboxed():
         return False
     sent = False
     for pid in ghostty_pids():
@@ -389,9 +400,7 @@ def ghostty_settings():
     theme's colors count too). A CURSOR_FX_CONFIG outside Ghostty's folders is a sandbox: that file's
     own lines. One inside them is a local include of the real config: it alone holds no theme or
     opacity, and reading only it would turn the light-theme and see-through code off."""
-    folder = os.path.dirname(os.path.realpath(CONFIG))
-    sandbox = "CURSOR_FX_CONFIG" in os.environ and folder not in map(os.path.realpath, ghostty_folders())
-    if sandbox or not GHOSTTY:
+    if sandboxed() or not GHOSTTY:
         return settings(CONFIG)
     try:
         out = subprocess.run([GHOSTTY, "+show-config"], capture_output=True, text=True, timeout=10).stdout
