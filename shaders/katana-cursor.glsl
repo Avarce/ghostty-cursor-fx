@@ -14,6 +14,8 @@
 // line takes the same style.
 // The input box's lines are steel edges: a glint slides along them every few
 // seconds.
+// TEXT_COLOR shows your text (Claude Code's input box and sent prompts, zsh's
+// command line) in the cursor's color, as easy to read as the terminal's text.
 
 // macOS: true. On Linux, change it to false (install.sh does this for you);
 // otherwise the effect plays upside down.
@@ -54,6 +56,10 @@ const bool  LINE_TINT      = true;  // the input box lines take the cursor's col
 const float LINE_COLOR     = 0.42;  // how much of the cursor's color the lines take, at their own brightness (0 to 1)
 const bool  LINE_EFFECT    = false;  // the input box lines, always: steel edges with a glint sliding along
 const float LINE_STRENGTH  = 1.0;  // how bright the animated lines are
+// -- Your text
+const bool  TEXT_COLOR     = false;  // your text in the cursor's color (Claude Code's input box and your sent prompts, zsh's command line), as easy to read as the terminal's text; dim and colored text stay as they are
+const bool  TEXT_TYPING    = true;  // the text you're typing (Claude Code's input box, zsh's command line)
+const bool  TEXT_SENT      = true;  // your sent prompts (the grey bars Claude Code shows them on)
 // -- Look
 const bool  SUBTLE         = false;  // the calm version for every day: smaller, dimmer moments and a quieter cursor (`cursor-fx subtle on|off`)
 const float GLOW_RADIUS   = 0.18;  // the glow around the blade, in character heights
@@ -74,6 +80,8 @@ const float SPLIT_REACH   = 1.6;   // how far from the cut the text moves, in ch
 const float IDLE_PERIOD   = 5.0;  // seconds between idle glints
 const float GLINT_TIME    = 0.14;  // seconds a glint takes to cross the cursor
 // -- Box lines
+// -- Your text
+const float TEXT_TINT      = 1.0;  // how much of the cursor's color your text takes
 // -- Look
 const float LINE_WIDTH    = 0.03;  // the blade's thickness, in character heights
 // --- fixed values (not shown in the panel; edit them here if you must) ---
@@ -124,6 +132,21 @@ vec4 screenAt(vec2 uv) {
     if (SEE_THROUGH && c.a > 0.0 && c.a < 1.0) c.rgb /= c.a;
     if (lightTheme()) c.rgb = themeFlip(c.rgb);
     return c;
+}
+
+// TEXT_COLOR's change to the screen color c at q (none when it's off), and the screen at q with
+// it: for the moments that move text (a ring bending it, a tear, a cut), so moved letters keep
+// your text's color. textTint() comes further down.
+vec3 textTint(vec2 p, vec3 col, vec2 res);
+bool textMoved = false;  // this pixel was drawn from the screen through textShift(): effectImage() leaves it
+vec3 textShift(vec2 q, vec3 c, vec2 res) {
+    if (!TEXT_COLOR || lightTheme() || iCurrentCursorStyle != CURSORSTYLE_BLOCK) return vec3(0.0);
+    textMoved = true;
+    return clamp(textTint(q, c, res), 0.0, 1.0) - c;
+}
+vec3 textAt(vec2 q, vec2 res) {
+    vec3 c = screenAt(q / res).rgb;
+    return c + textShift(q, c, res);
 }
 
 // A cursor rectangle with .xy its top-left corner in y-up pixels. Ghostty gives
@@ -329,7 +352,7 @@ vec3 enterEffect(vec2 p, vec4 cur, vec2 center, float cellW, float cellH, vec2 r
     float open = smoothstep(0.0, 0.15, x) * (1.0 - smoothstep(0.35, 1.0, x)) * cutHere * SUB_K;
     float near = 1.0 - smoothstep(0.05 * cellH, reach, abs(across));
     float side = across >= 0.0 ? 1.0 : -1.0;
-    col = screenAt((p - vec2(-side * SLIDE * cellH, side * 0.5 * SPLIT * cellH) * open * near) / res).rgb;
+    col = textAt(p - vec2(-side * SLIDE * cellH, side * 0.5 * SPLIT * cellH) * open * near, res);
     float gap = 0.5 * SPLIT * cellH * open;
     col *= mix(1.0, 0.25, (1.0 - smoothstep(gap * 0.6, gap + 0.5, abs(across))) * clamp(gap, 0.0, 1.0));
     float fade = 1.0 - smoothstep(ENTER_SWEEP, 0.3, t);
@@ -767,7 +790,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
             float near = 1.0 - smoothstep(0.2 * cellH, SPLIT_REACH * cellH, abs(across));
             float side = across >= 0.0 ? 1.0 : -1.0;
             vec2 offset = side * (n * SPLIT * 0.5 + dir * SLIDE * 0.5) * cellH * open * ends * near;
-            col = screenAt((p - offset) / res).rgb;
+            col = textAt(p - offset, res);
 
             // The opening itself is a dark slit.
             float gap = SPLIT * 0.5 * cellH * open * ends;
@@ -804,7 +827,7 @@ void effects(inout vec4 fragColor, vec2 fragCoord) {
         float open = smoothstep(0.0, 0.2, x) * (1.0 - smoothstep(0.4, 1.0, x)) * SUB_K;
         float side = across >= 0.0 ? 1.0 : -1.0;
         float inBlock = all(lessThan(abs(p - to), hs)) ? 1.0 : 0.0;
-        col = screenAt((p - n * side * TYPE_SPLIT * cellH * open * inBlock) / res).rgb;
+        col = textAt(p - n * side * TYPE_SPLIT * cellH * open * inBlock, res);
         float gap = TYPE_SPLIT * cellH * open;
         col *= mix(1.0, 0.35, (1.0 - smoothstep(gap * 0.6, gap + 0.5, abs(across))) * clamp(gap, 0.0, 1.0) * inBlock);
         float reached = clamp(sinceMove / TYPE_SWEEP, 0.0, 1.0) * 1.2 - 0.1;  // runs just past both corners
@@ -856,6 +879,309 @@ bool paneWall(float left, float w, vec4 cur, vec2 res) {
     return true;
 }
 
+// --- The typed text's color (TEXT_COLOR) ---
+
+vec3 linearToSRGB(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+
+// Relative luminance of a linear color.
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// A line across the whole window (with PANES: through the cursor's column, see
+// onBoxLine()) at height y (Claude Code's input box border): one
+// color, not the background, at twelve points along it, and background four pixels
+// above and below. A long row of text can have ink at a few points along one pixel
+// row, but never the same color all the way across.
+bool fullLine(float y, vec2 res) {
+    if (PANES) return onBoxLine(y, res);
+    vec3 first = screenAt(vec2(0.05 * res.x, y) / res).rgb;
+    if (colorDist(first, iBackgroundColor) < 0.03) return false;
+    for (int i = 1; i < 12; i++)
+        if (distance(screenAt(vec2((0.05 + 0.08 * float(i)) * res.x, y) / res).rgb, first) > 0.03) return false;
+    return colorDist(screenAt(vec2(0.45 * res.x, y + 4.0) / res).rgb, iBackgroundColor) < 0.03
+        && colorDist(screenAt(vec2(0.45 * res.x, y - 4.0) / res).rgb, iBackgroundColor) < 0.03;
+}
+
+// Such a line between heights y0 and y1, searched from y0 upward (or from y1 downward
+// with `down`), so the edge nearer the cursor is found: one pixel read per step, near
+// the window's right edge where text rarely reaches, in steps finer than the line is
+// thick; the whole line is checked only where that pixel isn't background. Its
+// height, or -1.
+float lineIn(float y0, float y1, bool down, float h, vec2 res) {
+    float st = max(1.0, floor(h / 19.0)), x = PANES ? boxColumnX() : 0.97 * res.x;
+    for (int i = 0; i < 80; i++) {
+        float at = down ? y1 - float(i) * st : y0 + float(i) * st;
+        if (at < y0 || at > y1) break;  // compared before rounding: a rounded first step can fall just outside
+        float y = floor(at) + 0.5;
+        if (colorDist(screenAt(vec2(x, y) / res).rgb, iBackgroundColor) < 0.03) continue;
+        if (fullLine(y, res)) return y;
+    }
+    return -1.0;
+}
+
+// Claude Code's input box around the cursor: its top and bottom lines (-1 when there
+// is no box, as in a shell). The line on one side is looked for one row away, then
+// two, then three (the cursor inside a prompt of many rows); from it the row height
+// is known, so the other line is looked for a whole number of rows away on the other
+// side. Rows can be taller than the cursor (adjust-cell-height), so the windows
+// allow rows of 0.98 to 1.47 cursor heights, and never two row counts at once.
+vec2 inputBox(vec4 cur, vec2 res) {
+    float h = cur.w, c = cur.y - 0.5 * h;
+    float top = lineIn(c + 0.85 * h, c + 1.75 * h, false, h, res), bot = -1.0, rows = 1.0;
+    if (top < 0.0) bot = lineIn(c - 1.75 * h, c - 0.85 * h, true, h, res);
+    if (top < 0.0 && bot < 0.0) {
+        // A shell prompt (a mark starting the cursor's row, no line beside it): no box,
+        // and no need for the longer searches.
+        if (clMarkLeft(cur, res) >= 0.0) return vec2(-1.0);
+        for (int k = 2; k <= 3; k++) {
+            rows = float(k);
+            vec2 w = k == 2 ? vec2(1.85, 2.95) * h : vec2(2.95, 3.9) * h;
+            top = lineIn(c + w.x, c + w.y, false, h, res);
+            if (top < 0.0) bot = lineIn(c - w.y, c - w.x, true, h, res);
+            if (top >= 0.0 || bot >= 0.0) break;
+        }
+        if (top < 0.0 && bot < 0.0) return vec2(-1.0);
+    }
+    float pitch = (top >= 0.0 ? top - c : c - bot) / rows;
+    for (int k = 1; k <= 8; k++) {
+        float at = float(k) * pitch;
+        if (top < 0.0) top = lineIn(c + at - 0.3 * h, c + at + 0.3 * h, false, h, res);
+        else if (bot < 0.0) bot = lineIn(c - at - 0.3 * h, c - at + 0.3 * h, true, h, res);
+        else break;
+    }
+    return top >= 0.0 && bot >= 0.0 ? vec2(top, bot) : vec2(-1.0);
+}
+
+// How far color c sits along the way from background `back` to text color `ink`, 0..1.
+float inkAmount(vec3 c, vec3 back, vec3 ink) {
+    vec3 d = ink - back;
+    return clamp(dot(c - back, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
+}
+
+// Ink in the cell (w wide) whose left edge is at x, on the row whose top is y (h the cursor's height).
+bool cellHasInk(float x, float w, float y, float h, vec2 res) {
+    return colorDist(screenAt(vec2(x + 0.3 * w, y - 0.5 * h) / res).rgb, iBackgroundColor) > 0.08
+        || colorDist(screenAt(vec2(x + 0.5 * w, y - 0.36 * h) / res).rgb, iBackgroundColor) > 0.08
+        || colorDist(screenAt(vec2(x + 0.72 * w, y - 0.5 * h) / res).rgb, iBackgroundColor) > 0.08
+        || colorDist(screenAt(vec2(x + 0.5 * w, y - 0.64 * h) / res).rgb, iBackgroundColor) > 0.08;
+}
+
+// The cursor on a later row of a prompt: Claude Code indents every row after the first by two cells.
+// The first column's x (two cells left of the row's first glyph, or of the cursor on an empty row), or
+// -1 when the row starts with a mark and a space (a one-row prompt, a shell's prompt). The window's
+// padding can be wider than a cell, so the glyph is looked for from the grid's first cell.
+float tallRow(vec4 cur, vec2 res) {
+    float w = cellWOf(cur), h = cur.w, first = -1.0;
+    if (w < 2.0) return -1.0;
+    // four cells a read round (the padding is rarely wider than two); the cell after the first glyph
+    // comes with it when it is one of the four
+    float next = -1.0;
+    for (float x = mod(cur.x, w); x < cur.x + 0.5 * w && first < 0.0; x += 4.0 * w) {
+        bvec4 n = bvec4(cellHasInk(x, w, cur.y, h, res), cellHasInk(x + w, w, cur.y, h, res),
+                        cellHasInk(x + 2.0 * w, w, cur.y, h, res), cellHasInk(x + 3.0 * w, w, cur.y, h, res));
+        for (int k = 0; k < 4; k++) {
+            float xk = x + float(k) * w;
+            if (first < 0.0 && (xk > cur.x - 0.5 || n[k])) { first = xk; next = k < 3 ? (n[k + 1] ? 1.0 : 0.0) : -1.0; }
+        }
+    }
+    if (first < 0.0) return -1.0;
+    if (first < cur.x - 0.5 && (next < 0.0 ? !cellHasInk(first + w, w, cur.y, h, res) : next < 0.5)) return -1.0;
+    return first - 2.0 * w >= mod(cur.x, w) - 0.5 ? first - 2.0 * w : -1.0;
+}
+
+bool inkAt(vec2 q, vec2 res) {  // a glyph's ink
+    return colorDist(screenAt(q / res).rgb, iBackgroundColor) > 0.08;
+}
+bool offBg(vec2 q, vec2 res) {  // anything but background (a box line is a dim grey)
+    return colorDist(screenAt(q / res).rgb, iBackgroundColor) >= 0.03;
+}
+
+// Claude Code's box line below the cursor (one to three rows down) that starts at x0: the height of
+// its middle, or -1. Four steps a read round, two pixels a step on a sharp screen (the line is thicker than that).
+float boxBelow(vec4 cur, float x0, vec2 res) {
+    float w = cellWOf(cur), h = cur.w, c = cur.y - 0.5 * h;
+    float st2 = h >= 24.0 ? 2.0 : 1.0, x9 = PANES ? boxColumnX() : 0.97 * res.x, bot = -1.0;
+    // a row down; two or three only when the row below the cursor holds more of the prompt (ink in
+    // its first two text cells, looked for down the whole height that row can have)
+    bool more = false;
+    for (int i = 0; i < 6; i++) {
+        float y = cur.y - (1.15 + 0.25 * float(i)) * h;
+        more = more || inkAt(vec2(x0 + 2.3 * w, y), res) || inkAt(vec2(x0 + 2.7 * w, y), res) || inkAt(vec2(x0 + 3.5 * w, y), res);
+    }
+    float reach = more ? 3.9 : 1.75;
+    for (float y = floor(c - 0.85 * h) + 0.5; y > c - reach * h && y > 0.0; y -= 4.0 * st2) {
+        bvec4 n = bvec4(offBg(vec2(x9, y), res), offBg(vec2(x9, y - st2), res), offBg(vec2(x9, y - 2.0 * st2), res), offBg(vec2(x9, y - 3.0 * st2), res));
+        if (!any(n)) continue;
+        for (int k = 0; k < 4; k++) {
+            float yk = y - float(k) * st2;
+            if (n[k] && fullLine(yk, res)) { bot = yk; break; }
+        }
+        if (bot >= 0.0) break;
+    }
+    if (bot < 0.0 || !offBg(vec2(x0 + 0.5 * w, bot), res) || (x0 > 0.5 * w && offBg(vec2(x0 - 0.5 * w, bot), res))) return -1.0;
+    float t = 1.0;  // its thickness: the height returned is its middle
+    for (int i = 0; i < 6; i++) if (t == float(i) + 1.0 && offBg(vec2(x9, bot - t), res)) t += 1.0;
+    return bot - 0.5 * (t - 1.0);
+}
+
+// From tallRow()'s column x0, for the pixel at height `above`: the input box however tall (a long
+// prompt), going up that column (Claude Code leaves it blank below the prompt mark) to the mark on the
+// box's first row, or to the box's top line, or past the pixel. Four steps a read round. Returns the
+// box's top, the line below the cursor, x0 and a height on the mark (-1 when none was reached); .x -2
+// when the box's first row is below the pixel (outside), all -1 when it isn't Claude Code's box.
+vec4 tallBox(vec4 cur, float x0, float above, vec2 res) {
+    float w = cellWOf(cur), h = cur.w;
+    float hit = -1.0, bot = -2.0, st = max(1.0, floor(h / 3.0));
+    for (float y = cur.y + 0.1 * h; y <= min(res.y, above + 1.5 * h); y += 8.0 * st) {
+        // past the first few rows: first make sure this is Claude Code's box (a shell stops here)
+        if (bot == -2.0 && y > cur.y + 2.5 * h) { bot = boxBelow(cur, x0, res); if (bot < 0.0) return vec4(-1.0); }
+        for (int k = 0; k < 8; k++) {  // eight steps a read round
+            float yk = y + float(k) * st;
+            if (hit < 0.0 && (inkAt(vec2(x0 + 0.3 * w, yk), res) || inkAt(vec2(x0 + 0.5 * w, yk), res) || inkAt(vec2(x0 + 0.72 * w, yk), res))) hit = yk;
+        }
+        if (hit >= 0.0) break;
+    }
+    if (bot == -2.0) bot = boxBelow(cur, x0, res);
+    if (bot < 0.0) return vec4(-1.0);
+    if (hit >= 0.0 && above > hit + 1.2 * h) return vec4(-2.0);  // the pixel is above the box's first row
+    if (hit < 0.0) return vec4(res.y + h, bot, x0, -1.0);  // no mark up to the pixel: its row is in the box
+    // The top line itself (a thin line across the window) or the mark: its top, a pixel at a time.
+    if (fullLine(floor(hit) + 0.5, res)) return vec4(hit, bot, x0, -1.0);
+    float top = hit;
+    for (float y = floor(hit) + 1.5; y <= hit + h; y += 1.0) {
+        if (!inkAt(vec2(x0 + 0.3 * w, y), res) && !inkAt(vec2(x0 + 0.5 * w, y), res) && !inkAt(vec2(x0 + 0.72 * w, y), res)) break;
+        top = y;
+    }
+    return vec4(top + 0.3 * h + 2.0, bot, x0, hit);
+}
+
+// The text you type and the prompts you sent, in the cursor's color: inside Claude
+// Code's input box (between its two lines across the window), on the grey bars
+// Claude Code draws your sent prompts on, and in a shell on the cursor's row right of
+// the prompt mark (❯). Only text drawn at full strength in the terminal's text color
+// or in white (Claude Code's color for your text) changes; dim text (a placeholder,
+// zsh's grey suggestion) and colored text (syntax highlighting, links) stay. Its
+// contrast against the background behind it matches the terminal's own text. TEXT_TYPING and
+// TEXT_SENT pick which of the two (what you type, what you sent) changes.
+vec3 textTint(vec2 p, vec3 col, vec2 res) {
+    vec3 s = screenAt(p / res).rgb;
+    if (colorDist(s, iBackgroundColor) < 0.03) return col;
+    // Worked out in sRGB, whatever the screen texture holds (told by the window's
+    // corner, which is background).
+    vec3 corner = screenAt(vec2(1.5) / res).rgb;
+    bool linear = distance(corner, sRGBToLinear(iBackgroundColor)) < distance(corner, iBackgroundColor);
+    vec3 bg = iBackgroundColor;
+    // A sent prompt's bar: the darkest of six points along this row (spaces and the
+    // row's end show the bar; letters don't) is exactly the background Claude Code's
+    // dark theme gives your own messages: rgb(55, 55, 55) for a prompt, rgb(65, 60, 65)
+    // for a `!` shell command. Other greys stay out: a message you click open gets
+    // rgb(70, 70, 70) behind Claude's output too.
+    vec3 back = vec3(1.0);
+    bool bar = false;
+    if (TEXT_SENT && PANES) {
+        // With PANES the bar spans only the cursor's pane: the first pixel column of the six cells
+        // around this one (letters rarely reach it); four must show the bar's grey (two cells can
+        // be past the pane's edge; a short grey highlight isn't a sent prompt).
+        vec4 cg = upCursor(iCurrentCursor);
+        float cw = max(cellWOf(cg), 1.0), e = cg.x + floor((p.x - cg.x) / cw) * cw + 0.5, seen = 0.0;
+        for (int i = 0; i < 6; i++) {
+            vec3 b = screenAt(vec2(e + float(i - 2) * cw, p.y) / res).rgb;
+            b = linear ? linearToSRGB(b) : b;
+            if (all(lessThan(abs(b - vec3(55.0) / 255.0), vec3(4.0 / 255.0)))
+                    || all(lessThan(abs(b - vec3(65.0, 60.0, 65.0) / 255.0), vec3(4.0 / 255.0)))) { back = b; seen += 1.0; }
+        }
+        if (seen < 4.0) back = vec3(1.0);
+    } else if (TEXT_SENT) {
+        for (int i = 0; i < 6; i++) {
+            vec3 b = screenAt(vec2((0.12 + 0.165 * float(i)) * res.x, p.y) / res).rgb;
+            b = linear ? linearToSRGB(b) : b;
+            if (dot(b, vec3(1.0)) < dot(back, vec3(1.0))) back = b;
+        }
+    }
+    if (TEXT_SENT) {
+        bar = all(lessThan(abs(back - vec3(55.0) / 255.0), vec3(4.0 / 255.0)))
+           || (all(lessThan(abs(back - vec3(65.0, 60.0, 65.0) / 255.0), vec3(4.0 / 255.0)))
+               && min(back.r, back.b) - back.g > 2.5 / 255.0);  // that one's faint pink, not a plain grey
+    }
+    if (!bar) {
+        if (!TEXT_TYPING) return col;  // only the sent prompts
+        back = bg;
+    }
+    vec4 cur = upCursor(iCurrentCursor);
+    float h = cur.w, c = cur.y - 0.5 * h;
+    if (!bar && (iCursorVisible == 0 || abs(p.y - c) > 10.0 * h)) return col;
+    // the cursor's own block (a steel cursor color can pass for white text): nearer its color than
+    // the background's and the text's (a see-through cursor too; a letter in a hollow one stays text)
+    if (!bar && p.x >= cur.x && p.x <= cur.x + cur.z && p.y <= cur.y && p.y >= cur.y - h
+            && colorDist(s, iCurrentCursorColor.rgb) <= min(colorDist(s, iBackgroundColor), colorDist(s, iForegroundColor))) return col;
+    // Which text color it is (the terminal's or white), how much of it this pixel has,
+    // and whether the glyph reaches it at full strength within a stroke's width. Told from
+    // the screen as it is where the effects only added light (a cursor's glow, sparks over a
+    // letter), so the letter keeps its color under them and the change adds to their light;
+    // where an effect moved or darkened the pixel, from the pixel as drawn.
+    vec3 cs = linear ? linearToSRGB(col) : col, ss = linear ? linearToSRGB(s) : s;
+    vec3 ts = all(greaterThanEqual(col, s - 0.004)) ? ss : cs;
+    vec3 fg = iForegroundColor;
+    float df = distance(ts, back + inkAmount(ts, back, fg) * (fg - back));
+    float dw = distance(ts, back + inkAmount(ts, back, vec3(1.0)) * (vec3(1.0) - back));
+    vec3 ink = df <= dw ? fg : vec3(1.0);
+    float a = inkAmount(ts, back, ink);
+    float gate = 1.0 - smoothstep(0.04, 0.09, min(df, dw));
+    if (a <= 0.0 || gate <= 0.0) return col;
+    float r = max(1.0, 0.04 * h), core = inkAmount(ss, back, ink);
+    for (int i = 0; i < 4; i++) {
+        vec3 n = screenAt((p + r * vec2(i % 2 == 0 ? -1.0 : 1.0, i < 2 ? -1.0 : 1.0)) / res).rgb;
+        core = max(core, inkAmount(linear ? linearToSRGB(n) : n, back, ink));
+    }
+    gate *= smoothstep(0.55, 0.8, core);
+    if (gate <= 0.0) return col;
+    if (!bar) {
+        // The cursor on a later row of a prompt: the box from its mark up to this pixel, however tall
+        // the prompt (rows within ten cursor heights; see above). Otherwise (a one-row prompt, a
+        // shell) the box near the cursor as before.
+        float tallX = tallRow(cur, res);
+        vec4 tall = tallX >= 0.0 ? tallBox(cur, tallX, p.y, res) : vec4(-1.0);
+        if (tall.x == -2.0) return col;
+        if (tall.x >= 0.0) {
+            // Whole rows only, as many as lie within ten cursor heights (the limit above): this pixel's
+            // row counted from the cursor's (rows 0.98 to 1.47 cursor heights tall, so the line's
+            // distance tells how many rows down it is).
+            float d = c - tall.y, pitch = d / (d < 1.72 * h ? 1.0 : d < 2.95 * h ? 2.0 : 3.0);  // the line is one to three rows down
+            float k = floor((p.y - c) / pitch + 0.5);
+            if (k > floor(10.0 * h / pitch - 0.5)) return col;
+        }
+        vec2 box = tall.x >= 0.0 ? tall.xy : inputBox(cur, res);
+        if (box.x >= 0.0) {
+            if (p.y > box.x - 2.0 || p.y < box.y + 2.0) return col;
+            float w = cellWOf(cur);
+            if (tall.x >= 0.0) {
+                // the mark's cell, on the box's first row (the first column is blank below it)
+                if (tall.w >= 0.0 && p.x >= tall.z - 1.0 && p.x <= tall.z + w + 1.0 && p.y >= tall.w - 0.7 * h) return col;
+            } else if (p.x < mod(cur.x, w) + 7.0 * w) {
+                float x0 = clMarkLeft(cur, res);
+                vec2 m = x0 >= 0.0 ? vec2(x0, cur.y) : clMarkAbove(cur, res);
+                if (m.x >= 0.0 && p.x >= m.x - 1.0 && p.x <= m.x + w + 1.0 && p.y <= m.y + 1.0 && p.y >= m.y - h - 1.0
+                        && clChevron(m.x, w, vec4(cur.x, m.y, cur.zw), res)) return col;
+            }
+        } else {
+            // A shell: the command you're typing, after the prompt mark.
+            if (p.y < cur.y - 1.1 * h || p.y > cur.y + 0.1 * h) return col;
+            float m = clMarkLeft(cur, res), w = cellWOf(cur);
+            if (m < 0.0 || p.x < m + 1.5 * w || !clChevron(m, w, cur, res)) return col;
+        }
+    }
+    // The cursor's color at the brightness that gives the terminal text's contrast on
+    // this background (the bar is lighter, so the green is too there).
+    vec3 k = sRGBToLinear(iCurrentCursorColor.rgb);
+    float lb = luma(sRGBToLinear(bg)), want = (luma(sRGBToLinear(fg)) + 0.05) / (lb + 0.05) * (luma(sRGBToLinear(back)) + 0.05) - 0.05;
+    vec3 green = linearToSRGB(min(k * want / max(luma(k), 1e-3), vec3(1.0)));
+    cs += a * gate * TEXT_TINT * (green - ink);
+    return linear ? sRGBToLinear(max(cs, 0.0)) : cs;
+}
+
 // With PANES the effects stay in the cursor's pane. With the input box in sight, a pixel counts
 // when the box line under the cursor runs unbroken from the cursor's column to it. With none (a
 // shell), when no pane edge lies between them. Only pixels an effect changed get here.
@@ -894,6 +1220,11 @@ void effectImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 under = fragColor.rgb;  // the screen before the moments (the subtle version mixes back to it)
     paneEffects(fragColor, fragCoord);
     // (subtle: the cuts open less and the blades are dimmer instead of a blend; see SUB_K)
+    // Your text's color stays when the window loses focus, like the line color.
+    if (TEXT_COLOR && !textMoved && !lightTheme() && iCurrentCursorStyle == CURSORSTYLE_BLOCK) {
+        vec3 tinted = clamp(textTint(fragCoord, fragColor.rgb, res), 0.0, 1.0);
+        if (!PANES || (tinted != fragColor.rgb && inCursorPane(fragCoord.x, res))) fragColor.rgb = tinted;  // with PANES, not another pane's text
+    }
     // The line color stays when the window loses focus; the moving looks don't.
     if (((LINE_EFFECT && iFocus != 0) || (LINE_TINT && LINE_COLOR > 0.0)) && iCursorVisible != 0 && iCurrentCursorStyle == CURSORSTYLE_BLOCK) fragColor.rgb = min(linesLook(fragCoord, fragColor.rgb), vec3(1.0));
     if (iCursorVisible == 0) return;

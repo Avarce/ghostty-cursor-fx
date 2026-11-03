@@ -1360,6 +1360,8 @@ PANEL_ZH = {
   "LINE_GLOW": "线条光晕",
   "TEXT_COLOR": "输入文字着色",
   "TEXT_TINT": "文字着色强度",
+  "TEXT_TYPING": "正在输入的文字",
+  "TEXT_SENT": "已发送的消息",
   "PHRASE_TIME": "中文解密时长",
   "LINE_WIDTH": "线条粗细",
   "MOVE_DURATION": "移动时长",
@@ -1623,6 +1625,8 @@ PANEL_ZH = {
   "how much of the cursor's color the lines take, at their own brightness (0 to 1)": "线条带上多少光标颜色，亮度保持不变（0 到 1）",
   "how bright the animated lines are": "动画线条的亮度",
   "how much of the cursor's color your text takes": "你的文字带上多少光标颜色",
+  "the text you're typing (Claude Code's input box, zsh's command line)": "正在输入的文字（Claude Code 的输入框、zsh 的命令行）",
+  "your sent prompts (the grey bars Claude Code shows them on)": "你发出的消息（Claude Code 显示它们的灰色横条）",
   "how much of the cursor's glow hugs the block (the rest spreads out)": "光标光晕中紧贴光标块的比例（其余向外扩散）",
   "how strong a keystroke's tear is, compared with a jump's full burst": "按键撕裂的强度，相对于跳跃时的完整爆发",
   "how strong an idle glitch is, compared with a move's": "空闲故障的强度，相对于移动时的故障",
@@ -2175,7 +2179,7 @@ const EN_NAMES = { DECODE_STYLE: "Typing style", WORD_DECODE: "Word decrypt", TY
   RISE: "Rise speed", SPREAD: "Drift speed", ARC: "Stream curve", GRID: "Grid strength", TRAIL: "Trail length",
   PING_RIM: "Ping brightness", FRINGE: "Color fringe", SPLIT: "Cut gap", SLIDE: "Cut slide", TYPE_SPLIT: "Cut gap",
   OVERSHOOT: "Cut overshoot", SPLIT_REACH: "Cut reach", STAGGER: "Pixel stagger", ENTER_JUMP: "Line jump", SLICES: "Slice count",
-  HOLO_COLOR: "Hologram color", TEXT_TINT: "Text color strength", ENTER_EMBERS: "Embers on Enter", TYPE_EMBERS: "Embers per key",
+  HOLO_COLOR: "Hologram color", TEXT_TINT: "Text color strength", TEXT_TYPING: "Text you type", TEXT_SENT: "Sent prompts", ENTER_EMBERS: "Embers on Enter", TYPE_EMBERS: "Embers per key",
   JUMP_EMBERS: "Embers on delete-all", ENTER_PIXELS: "Pixels on Enter", ENTER_SPREAD: "Spread time", ENTER_SWEEP: "Sweep time",
   ENTER_FUSE: "Fuse time", CURSOR_RAIN: "Cursor rain speed", CURSOR_SHADE: "Cursor glyph shade", IDLE_LIFE: "Stray ember life" };
 const labelOf = s => LANG === "zh" && ZH.names[s.name] ? ZH.names[s.name] : EN_NAMES[s.name] || humanize(s.name);

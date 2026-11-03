@@ -35,7 +35,10 @@ their own too (neon tubes, a lightning spark running across, a fireworks fuse, d
 dashes for cyber…), off by default, and take a little of the effect's color
 (`LINE_TINT` / `LINE_COLOR`, a plain tint, no glow). Every part of every effect has its
 own on/off switch: typing, Enter, done, delete-all, the cursor's look, the prompt mark,
-the box lines' color and their animated look (and blinking, off by default).
+the box lines' color and their animated look (and blinking, off by default). Your own
+text can take the cursor's color too: what you type and the prompts you sent, each with
+its own switch (on in cyber; off in the others, as it costs about 1.5 to 3.5 ms a frame
+on a big window).
 
 Moving forward along the row counts as typing: a letter, a Chinese character, or a
 whole phrase your input method commits at once (it plays like one keystroke, never the
@@ -59,6 +62,12 @@ redrawing the screen never set anything off.
 - **A prompt that wraps over several rows**: aurora, cyber, embers, fireworks, hologram, mecha and
   teleport play their Enter effect along the bottom box line only (glitch, katana,
   lightning, neon, phosphor and shockwave find both lines).
+- **Your text in the cursor's color** (the panel's "Your text"; on in cyber, off in the others):
+  sent prompts are found by the grey bar Claude Code draws behind them, exactly rgb 55,55,55
+  (65,60,65 for a `!` command) in its default dark theme. With another Claude Code theme, or if
+  an update changes that grey, sent prompts keep their own color. In a prompt taller than about
+  ten rows (fewer if you raised Ghostty's cell height), only the rows nearest the cursor take
+  the color.
 - **Forward jumps count as typing**: End, or accepting a shell suggestion, plays the small typing
   effect, not the big move (so committed Chinese text never sets off the delete-all move).
 - **Other programs that set the cursor color** themselves (OSC 12) with an odd blue or green value
@@ -72,7 +81,7 @@ redrawing the screen never set anything off.
   effects stay in the cursor's pane; a shell's Enter line stops at a pane's border. It costs about
   1 to 1.5 ms a frame, more during Enter. herdr draws its sidebar separator in its theme's
   `surface_dim`; if that is your background color, the effects can't see it: give `surface_dim` a
-  color of its own in herdr's `[theme.custom.dark]`. Checked in the test harness, not yet in herdr.
+  color of its own in herdr's `[theme.custom.dark]`. Checked in the test harness and in herdr.
 - **pi** needs "Show hardware cursor" on. Without it Ghostty sees no cursor: no cursor look,
   typing or done effects, and Enter plays where the cursor was last seen. The pi signals are
   checked with pi 1.4.0; the effects in pi are not yet checked in Ghostty.
@@ -89,7 +98,7 @@ redrawing the screen never set anything off.
 - Ghostty 1.4 or newer on **macOS or Linux** (Ghostty has no Windows build).
 - Python 3.8 or newer (for `cursor-fx`; no packages needed; the one that comes with macOS works).
 - A dark or a light theme. On a light background the effects draw ink instead of light, in their
-  own colors (embers is faint there); cyber then leaves your text its own color. Colors sit in the
+  own colors (embers is faint there); your text then keeps its own color. Colors sit in the
   7–9.5:1 contrast range on a dark grey background.
 - A block cursor (Ghostty's default). With a bar or underline cursor (for example vim's insert mode)
   the cursor, prompt-mark and box-line looks stay off; the moves and Enter effects still play.
@@ -184,7 +193,7 @@ the settings next to it: just type to try the effect, no click needed (Chinese a
 the line), or use its buttons for Enter, done and delete-all; zoom in on the cursor
 (2×, 4×) and slow it down (½×, ¼×) to see the details. Every effect's settings come
 in the same sections, in the same order: Typing, Enter & done, Delete-all, Cursor,
-Prompt mark ❯, Input box lines and Look. A section's on/off switch sits in its
+Prompt mark ❯, Input box lines, Your text and Look. A section's on/off switch sits in its
 title (its controls dim when it's off), the few settings worth a tweak sit under it,
 and the rest fold under "More settings" in the same section. Each number has a fixed
 range (from its note and its default), so a value can't run off into something
@@ -233,9 +242,9 @@ It shows up in `cursor-fx` and the panel automatically. Keep the shader's
 settings as `const` lines under a `// --- settings` comment, with the rarely
 needed ones after `// --- fine-tuning ---`. A `// -- Name` line starts a section;
 use the shared ones (`Typing`, `Enter & done`, `Delete-all`, `Cursor`, `Prompt mark`,
-`Box lines`, `Look`) and the shared switches (`TYPE_EFFECT`, `PHRASE_EFFECT`, `ENTER_EFFECT`,
+`Box lines`, `Your text`, `Look`) and the shared switches (`TYPE_EFFECT`, `PHRASE_EFFECT`, `ENTER_EFFECT`,
 `DONE_EFFECT`, `JUMP_EFFECTS`, `CURSOR_EFFECT`, `PROMPT_EFFECT`, `LINE_TINT`,
-`LINE_EFFECT`, `IDLE_EFFECTS`, `SUBTLE`) so the panel lays it out like the others. Write each
+`LINE_EFFECT`, `TEXT_COLOR`, `IDLE_EFFECTS`, `SUBTLE`) so the panel lays it out like the others. Write each
 note so it reads on its own. An `int` whose note ends in `: 0 one, 1 two, 2 three`
 shows as named buttons; a note with `(0 to 1)`, `at most N` or `(0 = none)` sets the
 range of its slider. Copy the `Y_DOWN` block from an
